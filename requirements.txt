@@ -1,0 +1,36 @@
+# === Core server ===
+flask==3.0.2
+
+# === Data ===
+pandas==2.3.1
+numpy<2.0
+scikit-learn==1.4.2
+tqdm==4.67.1
+
+# === Document parsing ===
+python-docx==1.1.0
+pdfplumber==0.11.0
+
+# === NLP / Embedding ===
+sentence-transformers==2.7.0
+transformers==4.43.1
+torch==2.2.2
+accelerate==0.30.1
+
+# === Vector Search ===
+faiss-cpu==1.8.0
+
+# === Database ===
+psycopg2-binary==2.9.9
+sqlalchemy==2.0.30
+
+# === Session / Caching ===
+cachetools==5.3.3
+
+# === Config / Utils ===
+python-dotenv==1.0.1
+regex==2024.5.15
+
+# === Dev/Test ===
+black==24.4.2
+pytest==8.2.1
