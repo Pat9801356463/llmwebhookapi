@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Policy Reasoning System</title>
+ <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <style>
+    body {
+      padding: 2rem;
+      background-color: #f8f9fa;
+    }
+    .response-block, .suggestion-block {
+      background-color: #ffffff;
+      border-radius: 8px;
+      padding: 1.5rem;
+      margin-top: 1rem;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    pre {
+      background-color: #f1f1f1;
+      padding: 1rem;
+      border-radius: 4px;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <h1 class="mb-4">🧠 Policy LLM Reasoning Engine</h1>
+    <form method="POST">
+      <div class="mb-3">
+        <label for="query" class="form-label">Enter Natural Language Query</label>
+        <input type="text" class="form-control" id="query" name="query" placeholder="e.g. 46M, knee surgery in Pune, 3-month-old policy" required>
+      </div>
+      <button type="submit" class="btn btn-primary">🔍 Submit</button>
+    </form>
+
+    {% if response %}
+      <div class="response-block mt-4">
+        <h3>✅ Response</h3>
+        <pre>{{ response | tojson(indent=2) }}</pre>
+      </div>
+    {% endif %}
+
+    {% if suggestions %}
+      <div class="suggestion-block mt-4">
+        <h3>📋 Alternate Policy Suggestions</h3>
+        <ul>
+          {% for suggestion in suggestions %}
+            <li><strong>{{ suggestion["PlanMarketingName"] }}</strong> - {{ suggestion["PlanType"] }} - ${{ suggestion["IndividualRate"] }} | Coverage: ${{ suggestion["PredictedCoverage"] }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+  </div>
+
+</body>
+</html>
