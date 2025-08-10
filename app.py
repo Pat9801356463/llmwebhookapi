@@ -31,7 +31,7 @@ def fetch_alternates_from_external(parsed):
         if res.status_code == 200:
             return res.json().get("plans", [])
         else:
-            print(f"⚠️ Failed to fetch alternates from external recommender. Status: {res.status_code}")
+            print(f"⚠️ Failed to fetch alternates. Status: {res.status_code}")
             return []
     except Exception as e:
         print("❌ Error fetching external alternatives:", e)
@@ -115,7 +115,7 @@ def hackrx_run():
     if not auth_header.startswith("Bearer ") or auth_header.split(" ")[1] != Config.API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
 
-    # 2. Read request body
+    # 2. Parse request
     data = request.get_json(force=True)
     pdf_url = data.get("documents")
     questions = data.get("questions", [])
@@ -136,18 +136,23 @@ def hackrx_run():
         text = ""
         with pdfplumber.open(pdf_bytes) as pdf:
             for page in pdf.pages:
-                text += page.extract_text() + "\n"
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
     except Exception as e:
         return jsonify({"error": f"Failed to extract PDF text: {e}"}), 500
 
-    # 5. Run Gemini for each question
+    # Limit text to avoid LLM token overflow
+    truncated_text = text[:15000]
+
+    # 5. Get answers
     answers = []
     for q in questions:
         prompt = (
             f"You are an insurance policy assistant.\n"
-            f"Policy document content:\n{text[:15000]}\n\n"
+            f"Policy document content:\n{truncated_text}\n\n"
             f"Question: {q}\n"
-            f"Answer concisely based only on the document content."
+            f"Answer concisely based ONLY on the above policy content."
         )
         try:
             answer = gemini_llm.generate(prompt)
@@ -155,7 +160,7 @@ def hackrx_run():
         except Exception as e:
             answers.append(f"Error generating answer: {e}")
 
-    # 6. Return JSON
+    # 6. Return HackRx format
     return jsonify({"answers": answers})
 
 if __name__ == "__main__":
