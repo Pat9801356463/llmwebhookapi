@@ -4,6 +4,7 @@ from typing import Dict, Any
 def format_decision_response(reasoning_result: Dict[str, Any]) -> Dict[str, Any]:
     """
     Formats the reasoning result into a structured response for UI or API.
+    Handles missing fields and prevents KeyErrors.
     """
     return {
         "query_details": reasoning_result.get("parsed", {}),
@@ -12,9 +13,13 @@ def format_decision_response(reasoning_result: Dict[str, Any]) -> Dict[str, Any]
         "justification": reasoning_result.get("justification", "No explanation provided."),
         "matched_clauses": [
             {
-                "source": clause["source"],
+                "source": clause.get("source", "unknown"),
                 "doc_type": clause.get("doc_type", "unknown"),
-                "text_snippet": clause["text"][:300] + "..." if len(clause["text"]) > 300 else clause["text"]
+                "text_snippet": (
+                    (clause.get("text") or "No text available")[:300] + "..."
+                    if clause.get("text") and len(clause.get("text")) > 300
+                    else (clause.get("text") or "No text available")
+                )
             }
             for clause in reasoning_result.get("matched_clauses", [])
         ]
