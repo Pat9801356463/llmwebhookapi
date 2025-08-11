@@ -1,4 +1,3 @@
-# engine/faiss_handler.py
 import faiss
 import numpy as np
 from typing import List, Tuple
@@ -35,25 +34,16 @@ def build_faiss_index_from_embeddings(embeddings: np.ndarray) -> faiss.IndexFlat
 
 
 def retrieve_top_chunks(query: str, chunks: List[str], embeddings: np.ndarray, top_k: int = 3) -> List[str]:
-    """
-    Retrieve most relevant chunks for a query given in-memory chunks + embeddings.
-    This avoids re-fetching from DB for every search.
-    """
+    """Retrieve most relevant chunks for a query given in-memory chunks + embeddings."""
     query_vec = embed_chunks([query])
     index = build_faiss_index_from_embeddings(embeddings)
     distances, indices = index.search(query_vec, top_k)
     return [chunks[i] for i in indices[0] if i < len(chunks)]
 
 
-def process_and_store_document(doc_id: str, doc_type: str, text: str) -> Tuple[List[str], np.ndarray]:
-    """
-    Process a new document into chunks + embeddings and save to DB.
-    Returns (chunks, embeddings).
-    """
+def process_and_store_document(doc_id: str, doc_type: str, text: str, source: str = None) -> Tuple[List[str], np.ndarray]:
+    """Process a new document into chunks + embeddings and save to DB."""
     chunks = chunk_text(text, Config.CHUNK_SIZE, Config.OVERLAP_SIZE)
     embeddings = embed_chunks(chunks)
-    save_chunks_to_db(
-        [{"doc_id": doc_id, "doc_type": doc_type, "chunk_id": i, "text": c} for i, c in enumerate(chunks)],
-        embeddings
-    )
+    save_chunks_to_db(doc_id, doc_type, chunks, embeddings, source=source)
     return chunks, embeddings
