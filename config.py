@@ -27,11 +27,15 @@ class Config:
     TEMPERATURE = float(os.getenv("TEMPERATURE", 0.3))
 
     # --- LLM Mode Switch ---
-    LLM_MODE = os.getenv("LLM_MODE", "local")  # "local" or "gemini"
+    LLM_MODE = os.getenv("LLM_MODE", "local")  # "local", "gemini", "cohere"
 
     # --- Gemini API Config ---
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+
+    # --- Cohere API Config ---
+    COHERE_API_KEY = os.getenv("COHERE_API_KEY", "")
+    COHERE_MODEL = os.getenv("COHERE_MODEL", "command-xlarge-nightly")
 
     # --- Indexer & FAISS ---
     FAISS_INDEX_PATH = os.getenv("FAISS_INDEX_PATH", "data/embeddings/faiss_index")
