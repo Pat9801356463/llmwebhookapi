@@ -6,14 +6,24 @@ class Config:
     SECRET_KEY = os.getenv("SECRET_KEY", "replace-this-secret")
 
     # --- Database Config ---
-    DB_NAME = os.getenv("DB_NAME", "policy_llm")
-    DB_USER = os.getenv("DB_USER", "postgres")
-    DB_PASSWORD = os.getenv("DB_PASSWORD", "postgres")
-    DB_HOST = os.getenv("DB_HOST", "localhost")
-    DB_PORT = int(os.getenv("DB_PORT", 5432))
+    # Prefer Railway-provided vars if available
+    DB_NAME = os.getenv("PGDATABASE", os.getenv("DB_NAME", "policy_llm"))
+    DB_USER = os.getenv("PGUSER", os.getenv("DB_USER", "postgres"))
+    DB_PASSWORD = os.getenv("PGPASSWORD", os.getenv("DB_PASSWORD", "postgres"))
+    DB_HOST = os.getenv("PGHOST", os.getenv("DB_HOST", "localhost"))
+    DB_PORT = int(os.getenv("PGPORT", os.getenv("DB_PORT", 5432)))
+
+    # Unified Postgres URI
+    POSTGRES_URI = os.getenv(
+        "DATABASE_URL",  # Railway-provided
+        f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    )
 
     # --- Embedding Model ---
-    EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
+    EMBEDDING_MODEL_NAME = os.getenv(
+        "EMBEDDING_MODEL_NAME",
+        "sentence-transformers/all-MiniLM-L6-v2"
+    )
 
     # --- LLM / Local Model Config ---
     LOCAL_MODEL_PATH = os.getenv("LOCAL_MODEL_PATH", "google/flan-t5-base")
@@ -22,7 +32,7 @@ class Config:
     TEMPERATURE = float(os.getenv("TEMPERATURE", 0.3))
 
     # --- LLM Mode Switch ---
-    LLM_MODE = os.getenv("LLM_MODE", "local")  # "local", "gemini", "cohere"
+    LLM_MODE = os.getenv("LLM_MODE", "gemini")  
 
     # --- Gemini API Config ---
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
