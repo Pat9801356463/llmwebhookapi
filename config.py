@@ -35,7 +35,7 @@ class Config:
     LLM_MODE = os.getenv("LLM_MODE", "gemini")  
 
     # --- Gemini API Config ---
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyB5tSjidvsJdNW1kRfAaw5pXoSiKe-iubY")
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
     # --- Cohere API Config ---
