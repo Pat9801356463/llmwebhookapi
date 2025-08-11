@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   db:
-    image: ankane/pgvector:latest  # ✅ pgvector-enabled image
+    image: ankane/pgvector:latest  # ✅ pgvector-enabled Postgres
     container_name: policy_llm_db
     environment:
       POSTGRES_USER: postgres
@@ -12,6 +12,24 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  api:
+    build: .
+    container_name: policy_llm_api
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=False
+      - SECRET_KEY=${SECRET_KEY}
+      - API_KEY=${API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL}
+      - COHERE_API_KEY=${COHERE_API_KEY}
+      - LLM_MODE=gemini
+    depends_on:
+      - db
+    restart: unless-stopped
 
 volumes:
   pgdata:
