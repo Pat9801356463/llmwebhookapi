@@ -74,7 +74,7 @@ def log_user_query(session_id: str, user_query: str, reasoning_result: Dict[str,
             ))
         conn.commit()
 
-def save_chunks_to_db(doc_id: str, doc_type: str, chunks: List[str], embeddings: np.ndarray):
+def save_chunks_to_db(doc_id: str, doc_type: str, chunks: List[str], embeddings: np.ndarray, source: str = None):
     with get_connection() as conn:
         with conn.cursor() as cur:
             for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
@@ -83,13 +83,14 @@ def save_chunks_to_db(doc_id: str, doc_type: str, chunks: List[str], embeddings:
                     VALUES (%s, %s, %s, %s, %s, %s);
                 """, (
                     doc_id,
-                    f"{doc_id}.source",  # source can be set as doc_id or actual filename
+                    source or doc_id,  # if filename is available, pass it
                     doc_type,
                     i,
                     chunk,
-                    emb.tolist()  # pgvector accepts Python lists for VECTOR columns
+                    emb.tolist()
                 ))
         conn.commit()
+
 
 def fetch_chunks_from_db(doc_id: str) -> List[Dict[str, Any]]:
     """Retrieve chunks and embeddings for a given document ID."""
