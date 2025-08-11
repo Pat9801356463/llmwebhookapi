@@ -1,6 +1,6 @@
 # === Core server ===
 flask==3.0.2
-gunicorn==22.0.0  # For production server deployment
+gunicorn==22.0.0
 
 # === Data ===
 pandas==2.3.1
@@ -11,7 +11,7 @@ tqdm==4.67.1
 # === Document parsing ===
 python-docx==1.1.0
 pdfplumber==0.11.0
-pdfminer.six==20231228  # pdfplumber dependency, ensures compatibility
+pdfminer.six==20231228
 
 # === NLP / Embedding ===
 sentence-transformers==2.7.0
@@ -24,7 +24,6 @@ faiss-cpu==1.8.0
 
 # === Database ===
 psycopg2-binary==2.9.9
-sqlalchemy==2.0.30
 
 # === Session / Caching ===
 cachetools==5.3.3
@@ -32,12 +31,8 @@ cachetools==5.3.3
 # === Config / Utils ===
 python-dotenv==1.0.1
 regex==2024.5.15
-requests==2.32.3  # For PDF download and API calls
+requests==2.32.3
 
 # === LLM Clients ===
-google-generativeai==0.4.1  # Gemini API client
-cohere==5.5.8  # Cohere API client (fallback for Gemini)
-
-# === Dev/Test ===
-black==24.4.2
-pytest==8.2.1
+google-generativeai==0.4.1
+cohere==5.5.8
