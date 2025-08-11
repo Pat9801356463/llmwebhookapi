@@ -12,6 +12,17 @@ from engine.reasoner import reason_over_query
 
 app = Flask(__name__)
 
+# --- Root & Healthcheck Routes ---
+@app.route("/", methods=["GET"])
+def index():
+    """Root endpoint to verify deployment."""
+    return jsonify({"status": "ok", "message": "API deployed successfully", "llm_mode": Config.LLM_MODE})
+
+@app.route("/health", methods=["GET"])
+def health():
+    """Healthcheck endpoint."""
+    return jsonify({"status": "healthy"}), 200
+
 
 def extract_text_from_url(url: str) -> str:
     """Download and extract text from PDF or DOCX."""
