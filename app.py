@@ -12,18 +12,21 @@ from engine.reasoner import reason_over_query
 
 app = Flask(__name__)
 
-# --- Root & Healthcheck Routes ---
+# --- Health & Root ---
 @app.route("/", methods=["GET"])
 def index():
-    """Root endpoint to verify deployment."""
-    return jsonify({"status": "ok", "message": "API deployed successfully", "llm_mode": Config.LLM_MODE})
+    return jsonify({
+        "status": "ok",
+        "message": "Policy LLM API is running",
+        "endpoints": ["/hackrx/run", "/health"]
+    })
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Healthcheck endpoint."""
     return jsonify({"status": "healthy"}), 200
 
 
+# --- Utils ---
 def extract_text_from_url(url: str) -> str:
     """Download and extract text from PDF or DOCX."""
     try:
@@ -55,6 +58,7 @@ def get_doc_id(url: str) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
 
 
+# --- Main API ---
 @app.route("/hackrx/run", methods=["POST"])
 def hackrx_run():
     # === 1. Auth check ===
@@ -95,3 +99,4 @@ def hackrx_run():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=False)
+
