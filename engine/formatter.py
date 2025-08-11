@@ -3,8 +3,8 @@ from typing import Dict, Any
 
 def format_decision_response(reasoning_result: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Formats the reasoning result into a structured response for UI or API.
-    Handles missing fields and prevents KeyErrors.
+    Format the reasoning result into a structured API/UI response.
+    Ensures safe access to fields and trims long clause text.
     """
     return {
         "query_details": reasoning_result.get("parsed", {}),
@@ -31,16 +31,25 @@ def format_pretty_print(response_dict: Dict[str, Any]) -> str:
     """
     return json.dumps(response_dict, indent=2, ensure_ascii=False)
 
-# For backward compatibility with app.py
+# Backward compatibility alias
 format_response = format_decision_response
 
 # 🧪 Example usage
 if __name__ == "__main__":
-    from reasoner import reason_over_query
+    sample_reasoning_result = {
+        "parsed": {"age": 46, "condition": "knee surgery", "location": "Pune"},
+        "decision": "approve",
+        "amount": 120000,
+        "justification": "Covered under standard orthopedic surgery terms.",
+        "matched_clauses": [
+            {
+                "source": "policy_doc_1",
+                "doc_type": "policy",
+                "text": "Knee surgeries are covered up to ₹1,50,000 in the 3-month plan..."
+            }
+        ]
+    }
 
-    raw_query = "46M, knee surgery in Pune, 3-month policy"
-    raw_result = reason_over_query(raw_query)
-
-    formatted = format_decision_response(raw_result)
+    formatted = format_decision_response(sample_reasoning_result)
     print("✅ Final Output:\n")
     print(format_pretty_print(formatted))
