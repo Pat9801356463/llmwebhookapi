@@ -11,6 +11,7 @@ from engine.cohere_runner import CohereLLM
 from engine.faiss_handler import process_and_store_document, retrieve_top_chunks
 from engine.db import fetch_chunks_from_db
 from engine.formatter import format_decision_response
+from engine.query_parser import parse_query  # ✅ integrated parser
 
 app = Flask(__name__)
 
@@ -30,7 +31,7 @@ def extract_text_from_url(url: str) -> str:
             text = ""
             with pdfplumber.open(file_bytes) as pdf:
                 for page in pdf.pages:
-                    page_text = page.extract_text()
+                    page_text = pdf.pages[page.page_number - 1].extract_text()
                     if page_text:
                         text += page_text + "\n"
             return text
@@ -113,12 +114,17 @@ def hackrx_run():
         )
 
         raw_answer = get_llm_answer(prompt)
+        parsed_meta = parse_query(q)  # ✅ structured parsing
+
         reasoning_result = {
-            "parsed": {"question": q},
-            "decision": "info",  # Could be set by a reasoning pipeline
+            "parsed": parsed_meta,
+            "decision": "info",  # could be set by a reasoning pipeline
             "amount": None,
             "justification": raw_answer,
-            "matched_clauses": [{"source": doc_id, "doc_type": "policy", "text": c} for c in top_chunks]
+            "matched_clauses": [
+                {"source": doc_id, "doc_type": "policy", "text": c}
+                for c in top_chunks
+            ]
         }
         answers.append(format_decision_response(reasoning_result))
 
@@ -128,4 +134,3 @@ def hackrx_run():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=False)
-
