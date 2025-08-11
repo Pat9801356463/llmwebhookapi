@@ -1,7 +1,9 @@
+# engine/db.py
 import psycopg2
 from psycopg2.extras import Json
 from typing import List, Dict, Any
 from config import Config
+import numpy as np
 
 def get_connection():
     return psycopg2.connect(
@@ -34,17 +36,24 @@ def create_tables():
             """)
 
             # Table for document chunks and embeddings
-            cur.execute("""
+            cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS indexed_chunks (
                     id SERIAL PRIMARY KEY,
+                    doc_id TEXT,
                     source TEXT,
                     doc_type TEXT,
                     chunk_id INT,
                     text TEXT,
-                    embedding VECTOR(384)
+                    embedding VECTOR({get_embedding_dim()})
                 );
             """)
         conn.commit()
+
+def get_embedding_dim():
+    """Return embedding dimension for configured model."""
+    # MiniLM-L6-v2 => 384 dims
+    # You can change here if using another model
+    return 384
 
 def log_user_query(session_id: str, user_query: str, reasoning_result: Dict[str, Any]):
     with get_connection() as conn:
@@ -65,21 +74,39 @@ def log_user_query(session_id: str, user_query: str, reasoning_result: Dict[str,
             ))
         conn.commit()
 
-def save_chunks_to_db(metadata_list: List[Dict[str, Any]], embeddings: Any):
+def save_chunks_to_db(doc_id: str, doc_type: str, chunks: List[str], embeddings: np.ndarray):
     with get_connection() as conn:
         with conn.cursor() as cur:
-            for meta, emb in zip(metadata_list, embeddings):
+            for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
                 cur.execute("""
-                    INSERT INTO indexed_chunks (source, doc_type, chunk_id, text, embedding)
-                    VALUES (%s, %s, %s, %s, %s);
+                    INSERT INTO indexed_chunks (doc_id, source, doc_type, chunk_id, text, embedding)
+                    VALUES (%s, %s, %s, %s, %s, %s);
                 """, (
-                    meta["source"],
-                    meta.get("doc_type", "unknown"),
-                    meta.get("chunk_id", 0),
-                    meta["text"],
-                    emb.tolist()
+                    doc_id,
+                    f"{doc_id}.source",  # source can be set as doc_id or actual filename
+                    doc_type,
+                    i,
+                    chunk,
+                    emb.tolist()  # pgvector accepts Python lists for VECTOR columns
                 ))
         conn.commit()
+
+def fetch_chunks_from_db(doc_id: str) -> List[Dict[str, Any]]:
+    """Retrieve chunks and embeddings for a given document ID."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT text, embedding
+                FROM indexed_chunks
+                WHERE doc_id = %s
+                ORDER BY chunk_id ASC;
+            """, (doc_id,))
+            rows = cur.fetchall()
+
+    return [
+        {"text": row[0], "embedding": np.array(row[1], dtype=np.float32)}
+        for row in rows
+    ] if rows else []
 
 # 🧪 Manual Run
 if __name__ == "__main__":
