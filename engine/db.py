@@ -1,4 +1,3 @@
-# engine/db.py
 import psycopg2
 from psycopg2.extras import Json
 from typing import List, Dict, Any
@@ -17,10 +16,7 @@ def get_connection():
 def create_tables():
     with get_connection() as conn:
         with conn.cursor() as cur:
-            # Enable pgvector extension
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-
-            # Table for queries and results
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS queries (
                     id SERIAL PRIMARY KEY,
@@ -34,8 +30,6 @@ def create_tables():
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-
-            # Table for document chunks and embeddings
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS indexed_chunks (
                     id SERIAL PRIMARY KEY,
@@ -50,10 +44,7 @@ def create_tables():
         conn.commit()
 
 def get_embedding_dim():
-    """Return embedding dimension for configured model."""
-    # MiniLM-L6-v2 => 384 dims
-    # You can change here if using another model
-    return 384
+    return 384  # MiniLM-L6-v2 default
 
 def log_user_query(session_id: str, user_query: str, reasoning_result: Dict[str, Any]):
     with get_connection() as conn:
@@ -83,7 +74,7 @@ def save_chunks_to_db(doc_id: str, doc_type: str, chunks: List[str], embeddings:
                     VALUES (%s, %s, %s, %s, %s, %s);
                 """, (
                     doc_id,
-                    source or doc_id,  # if filename is available, pass it
+                    source or doc_id,
                     doc_type,
                     i,
                     chunk,
@@ -91,9 +82,7 @@ def save_chunks_to_db(doc_id: str, doc_type: str, chunks: List[str], embeddings:
                 ))
         conn.commit()
 
-
 def fetch_chunks_from_db(doc_id: str) -> List[Dict[str, Any]]:
-    """Retrieve chunks and embeddings for a given document ID."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -109,7 +98,6 @@ def fetch_chunks_from_db(doc_id: str) -> List[Dict[str, Any]]:
         for row in rows
     ] if rows else []
 
-# 🧪 Manual Run
 if __name__ == "__main__":
     create_tables()
     print("✅ Tables ensured.")
