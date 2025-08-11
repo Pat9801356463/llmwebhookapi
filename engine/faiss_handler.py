@@ -5,7 +5,7 @@ from sentence_transformers import SentenceTransformer
 from config import Config
 from engine.db import save_chunks_to_db, fetch_chunks_from_db
 
-# Load embedding model
+# === Load embedding model once ===
 EMBEDDING_MODEL = SentenceTransformer(Config.EMBEDDING_MODEL_NAME)
 
 
@@ -21,29 +21,42 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> List[str
 
 
 def embed_chunks(chunks: List[str]) -> np.ndarray:
-    """Get embeddings for text chunks."""
+    """Generate dense embeddings for a list of text chunks."""
     return EMBEDDING_MODEL.encode(chunks, convert_to_numpy=True)
 
 
-def build_faiss_index_from_embeddings(embeddings: np.ndarray) -> faiss.IndexFlatL2:
-    """Build a FAISS index directly from precomputed embeddings."""
+def build_faiss_index(embeddings: np.ndarray) -> faiss.IndexFlatL2:
+    """Create a FAISS index for similarity search."""
     dim = embeddings.shape[1]
     index = faiss.IndexFlatL2(dim)
     index.add(embeddings)
     return index
 
 
-def retrieve_top_chunks(query: str, chunks: List[str], embeddings: np.ndarray, top_k: int = 3) -> List[str]:
-    """Retrieve most relevant chunks for a query given in-memory chunks + embeddings."""
-    query_vec = embed_chunks([query])
-    index = build_faiss_index_from_embeddings(embeddings)
-    distances, indices = index.search(query_vec, top_k)
-    return [chunks[i] for i in indices[0] if i < len(chunks)]
-
-
 def process_and_store_document(doc_id: str, doc_type: str, text: str, source: str = None) -> Tuple[List[str], np.ndarray]:
-    """Process a new document into chunks + embeddings and save to DB."""
+    """Chunk → embed → save to DB. Skip if already exists."""
+    existing = fetch_chunks_from_db(doc_id)
+    if existing:
+        chunks = [c["text"] for c in existing]
+        embeddings = np.vstack([c["embedding"] for c in existing])
+        return chunks, embeddings
+
     chunks = chunk_text(text, Config.CHUNK_SIZE, Config.OVERLAP_SIZE)
     embeddings = embed_chunks(chunks)
     save_chunks_to_db(doc_id, doc_type, chunks, embeddings, source=source)
     return chunks, embeddings
+
+
+def retrieve_top_chunks(query: str, doc_id: str, top_k: int = 3) -> List[str]:
+    """Retrieve top-K chunks for a query from DB + FAISS search."""
+    stored_chunks = fetch_chunks_from_db(doc_id)
+    if not stored_chunks:
+        return []
+
+    chunks = [c["text"] for c in stored_chunks]
+    embeddings = np.vstack([c["embedding"] for c in stored_chunks])
+
+    query_vec = embed_chunks([query])
+    index = build_faiss_index(embeddings)
+    distances, indices = index.search(query_vec, top_k)
+    return [chunks[i] for i in indices[0] if i < len(chunks)]
