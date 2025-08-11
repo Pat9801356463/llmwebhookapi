@@ -4,24 +4,21 @@ import io
 import hashlib
 import pdfplumber
 import docx
-import numpy as np
 from config import Config
 from engine.gemini_runner import GeminiLLM
 from engine.cohere_runner import CohereLLM
 from engine.faiss_handler import process_and_store_document, retrieve_top_chunks
-from engine.db import fetch_chunks_from_db, log_user_query
+from engine.db import log_user_query
 from engine.formatter import format_decision_response
 from engine.query_parser import parse_query
 
 app = Flask(__name__)
 
-# === LLM Clients ===
 gemini_llm = GeminiLLM()
 cohere_llm = CohereLLM()
 
-
 def extract_text_from_url(url: str) -> str:
-    """Download and extract text from PDF or DOCX URL."""
+    """Extract text from PDF/DOCX."""
     try:
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
@@ -35,31 +32,24 @@ def extract_text_from_url(url: str) -> str:
                     if page_text:
                         text += page_text + "\n"
             return text
-
         elif url.lower().endswith(".docx"):
             doc = docx.Document(file_bytes)
             return "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-
         return ""
     except Exception as e:
         print(f"❌ Document extraction failed: {e}")
         return ""
 
-
 def get_doc_id(url: str) -> str:
-    """Generate a unique document ID from its URL."""
     return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
 
-
 def get_llm_answer(prompt: str) -> str:
-    """Try Gemini first, fallback to Cohere if it fails or returns error/empty."""
     try:
         ans = gemini_llm.generate(prompt)
-        if ans and not ans.strip().startswith("❌") and ans.strip():
+        if ans and ans.strip() and not ans.strip().startswith("❌"):
             return ans.strip()
-        print(f"⚠️ Gemini returned error/empty — falling back to Cohere: {ans}")
     except Exception as e:
-        print(f"⚠️ Gemini call failed: {e}")
+        print(f"⚠️ Gemini failed: {e}")
 
     try:
         coh_ans = cohere_llm.generate(prompt)
@@ -67,17 +57,14 @@ def get_llm_answer(prompt: str) -> str:
             return coh_ans.strip()
         return f"❌ Cohere returned error: {coh_ans}"
     except Exception as e2:
-        return f"❌ Error generating answer with Cohere: {e2}"
-
+        return f"❌ Cohere failed: {e2}"
 
 @app.route("/hackrx/run", methods=["POST"])
 def hackrx_run():
-    # === 1. Auth check ===
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer ") or auth_header.split(" ")[1] != Config.API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
 
-    # === 2. Parse request ===
     data = request.get_json(force=True)
     doc_url = data.get("documents")
     questions = data.get("questions", [])
@@ -87,26 +74,12 @@ def hackrx_run():
         return jsonify({"error": "Missing 'documents' or 'questions'"}), 400
 
     doc_id = get_doc_id(doc_url)
+    chunks, embeddings = process_and_store_document(doc_id, "policy", extract_text_from_url(doc_url))
 
-    # === 3. Retrieve or process document ===
-    stored_chunks = fetch_chunks_from_db(doc_id)
-    if stored_chunks:
-        print(f"📂 Found {len(stored_chunks)} chunks in DB for {doc_id}")
-        chunks = [c["text"] for c in stored_chunks]
-        embeddings = np.vstack([c["embedding"] for c in stored_chunks])
-    else:
-        print(f"🆕 Processing new document {doc_id}")
-        policy_text = extract_text_from_url(doc_url)
-        if not policy_text:
-            return jsonify({"error": "Failed to extract document text"}), 500
-        chunks, embeddings = process_and_store_document(doc_id, "policy", policy_text)
-
-    # === 4. Answer each question ===
     answers = []
     for q in questions:
-        parsed_meta = parse_query(q)  # 🆕 extract metadata from query
-
-        top_chunks = retrieve_top_chunks(q, chunks, embeddings, top_k=3)
+        parsed_meta = parse_query(q)
+        top_chunks = retrieve_top_chunks(q, doc_id, top_k=3)
         context = "\n".join(top_chunks)
 
         prompt = (
@@ -128,14 +101,10 @@ def hackrx_run():
             ]
         }
 
-        # 🆕 Log each Q&A into DB
         log_user_query(session_id, q, reasoning_result)
-
         answers.append(format_decision_response(reasoning_result))
 
-    # === 5. Return formatted HackRx format ===
     return jsonify({"answers": answers})
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=False)
