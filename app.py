@@ -10,6 +10,7 @@ from engine.gemini_runner import GeminiLLM
 from engine.cohere_runner import CohereLLM
 from engine.faiss_handler import process_and_store_document, retrieve_top_chunks
 from engine.db import fetch_chunks_from_db
+from engine.formatter import format_decision_response
 
 app = Flask(__name__)
 
@@ -96,7 +97,7 @@ def hackrx_run():
         policy_text = extract_text_from_url(doc_url)
         if not policy_text:
             return jsonify({"error": "Failed to extract document text"}), 500
-        chunks, embeddings = process_and_store_document(doc_id, "policy", policy_text, source=doc_url)
+        chunks, embeddings = process_and_store_document(doc_id, "policy", policy_text)
 
     # === 4. Answer each question ===
     answers = []
@@ -111,11 +112,20 @@ def hackrx_run():
             f"Answer concisely and ONLY based on the policy content."
         )
 
-        answers.append(get_llm_answer(prompt))
+        raw_answer = get_llm_answer(prompt)
+        reasoning_result = {
+            "parsed": {"question": q},
+            "decision": "info",  # Could be set by a reasoning pipeline
+            "amount": None,
+            "justification": raw_answer,
+            "matched_clauses": [{"source": doc_id, "doc_type": "policy", "text": c} for c in top_chunks]
+        }
+        answers.append(format_decision_response(reasoning_result))
 
-    # === 5. Return HackRx format ===
+    # === 5. Return formatted HackRx format ===
     return jsonify({"answers": answers})
 
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=False)
+
