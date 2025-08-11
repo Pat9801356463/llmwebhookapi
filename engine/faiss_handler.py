@@ -5,8 +5,18 @@ from sentence_transformers import SentenceTransformer
 from config import Config
 from engine.db import save_chunks_to_db, fetch_chunks_from_db
 
-# === Load embedding model once ===
-EMBEDDING_MODEL = SentenceTransformer(Config.EMBEDDING_MODEL_NAME)
+# === Lazy load embedding model ===
+EMBEDDING_MODEL = None
+
+def get_embedding_model():
+    """
+    Loads the embedding model only once at runtime.
+    This avoids downloading the model during Railway build.
+    """
+    global EMBEDDING_MODEL
+    if EMBEDDING_MODEL is None:
+        EMBEDDING_MODEL = SentenceTransformer(Config.EMBEDDING_MODEL_NAME)
+    return EMBEDDING_MODEL
 
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> List[str]:
@@ -22,7 +32,8 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> List[str
 
 def embed_chunks(chunks: List[str]) -> np.ndarray:
     """Generate dense embeddings for a list of text chunks."""
-    return EMBEDDING_MODEL.encode(chunks, convert_to_numpy=True)
+    model = get_embedding_model()
+    return model.encode(chunks, convert_to_numpy=True)
 
 
 def build_faiss_index(embeddings: np.ndarray) -> faiss.IndexFlatL2:
