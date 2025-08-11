@@ -1,8 +1,4 @@
 import os
-from dotenv import load_dotenv
-
-# Load variables from .env if it exists
-load_dotenv()
 
 class Config:
     # --- App Config ---
@@ -10,7 +6,6 @@ class Config:
     SECRET_KEY = os.getenv("SECRET_KEY", "replace-this-secret")
 
     # --- Database Config ---
-    POSTGRES_URI = os.getenv("POSTGRES_URI", "postgresql://user:password@localhost:5432/policy_llm")
     DB_NAME = os.getenv("DB_NAME", "policy_llm")
     DB_USER = os.getenv("DB_USER", "postgres")
     DB_PASSWORD = os.getenv("DB_PASSWORD", "postgres")
@@ -38,13 +33,12 @@ class Config:
     COHERE_MODEL = os.getenv("COHERE_MODEL", "command-xlarge-nightly")
 
     # --- Indexer & FAISS ---
-    FAISS_INDEX_PATH = os.getenv("FAISS_INDEX_PATH", "data/embeddings/faiss_index")
     CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 500))
     OVERLAP_SIZE = int(os.getenv("OVERLAP_SIZE", 100))
 
     # --- Cache Management ---
     SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", 30))
-    CACHE_MAX_QUERIES = int(os.getenv("CACHE_MAX_QUERIES", 50))  # LRU cache
+    CACHE_MAX_QUERIES = int(os.getenv("CACHE_MAX_QUERIES", 50))
 
     # --- Logging & Monitoring ---
     ENABLE_LOGGING = os.getenv("ENABLE_LOGGING", "True").lower() == "true"
