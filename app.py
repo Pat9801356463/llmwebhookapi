@@ -9,9 +9,9 @@ from config import Config
 from engine.gemini_runner import GeminiLLM
 from engine.cohere_runner import CohereLLM
 from engine.faiss_handler import process_and_store_document, retrieve_top_chunks
-from engine.db import fetch_chunks_from_db
+from engine.db import fetch_chunks_from_db, log_user_query
 from engine.formatter import format_decision_response
-from engine.query_parser import parse_query  # ✅ integrated parser
+from engine.query_parser import parse_query
 
 app = Flask(__name__)
 
@@ -31,7 +31,7 @@ def extract_text_from_url(url: str) -> str:
             text = ""
             with pdfplumber.open(file_bytes) as pdf:
                 for page in pdf.pages:
-                    page_text = pdf.pages[page.page_number - 1].extract_text()
+                    page_text = page.extract_text()
                     if page_text:
                         text += page_text + "\n"
             return text
@@ -81,6 +81,7 @@ def hackrx_run():
     data = request.get_json(force=True)
     doc_url = data.get("documents")
     questions = data.get("questions", [])
+    session_id = data.get("session_id", "anonymous")
 
     if not doc_url or not questions:
         return jsonify({"error": "Missing 'documents' or 'questions'"}), 400
@@ -103,6 +104,8 @@ def hackrx_run():
     # === 4. Answer each question ===
     answers = []
     for q in questions:
+        parsed_meta = parse_query(q)  # 🆕 extract metadata from query
+
         top_chunks = retrieve_top_chunks(q, chunks, embeddings, top_k=3)
         context = "\n".join(top_chunks)
 
@@ -114,11 +117,9 @@ def hackrx_run():
         )
 
         raw_answer = get_llm_answer(prompt)
-        parsed_meta = parse_query(q)  # ✅ structured parsing
-
         reasoning_result = {
-            "parsed": parsed_meta,
-            "decision": "info",  # could be set by a reasoning pipeline
+            "parsed": {**parsed_meta, "question": q},
+            "decision": "info",
             "amount": None,
             "justification": raw_answer,
             "matched_clauses": [
@@ -126,6 +127,10 @@ def hackrx_run():
                 for c in top_chunks
             ]
         }
+
+        # 🆕 Log each Q&A into DB
+        log_user_query(session_id, q, reasoning_result)
+
         answers.append(format_decision_response(reasoning_result))
 
     # === 5. Return formatted HackRx format ===
