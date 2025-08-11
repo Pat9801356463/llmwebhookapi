@@ -7,10 +7,10 @@ class Config:
 
     # --- Database Config ---
     # Prefer Railway-provided vars if available
-    DB_NAME = os.getenv("PGDATABASE", os.getenv("DB_NAME", "policy_llm"))
+    DB_NAME = os.getenv("PGDATABASE", os.getenv("DB_NAME", "railway"))
     DB_USER = os.getenv("PGUSER", os.getenv("DB_USER", "postgres"))
-    DB_PASSWORD = os.getenv("PGPASSWORD", os.getenv("DB_PASSWORD", "postgres"))
-    DB_HOST = os.getenv("PGHOST", os.getenv("DB_HOST", "localhost"))
+    DB_PASSWORD = os.getenv("PGPASSWORD", os.getenv("DB_PASSWORD", "zUCCqLepmlTwrQhxDwpwWnAUvHqbWgkt"))
+    DB_HOST = os.getenv("PGHOST", os.getenv("DB_HOST", "postgres.railway.internal"))
     DB_PORT = int(os.getenv("PGPORT", os.getenv("DB_PORT", 5432)))
 
     # Unified Postgres URI
@@ -58,4 +58,5 @@ class Config:
     WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
     # --- HackRx Authentication ---
-    API_KEY = os.getenv("API_KEY", "")
+    API_KEY = os.getenv("API_KEY", "ce10025c4a5a05ce5776d7c1c8136640412c48de7a7ddcc1c7d80ce1dfb13cff")
+
