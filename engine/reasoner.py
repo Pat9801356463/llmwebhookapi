@@ -1,9 +1,12 @@
-from engine.query_parser import parse_query
-from engine.retriever import retrieve_clauses
-from config import Config
-import json
+# engine/reasoner.py
 
-# Dynamically load LLM based on mode
+import json
+from config import Config
+from engine.query_parser import parse_query
+from engine.faiss_handler import retrieve_top_chunks
+from engine.db import fetch_chunks_from_db
+
+# === Dynamically select LLM client ===
 if getattr(Config, "LLM_MODE", "local").lower() == "gemini":
     from engine.gemini_runner import GeminiLLM
     llm = GeminiLLM()
@@ -13,6 +16,7 @@ else:
 
 
 def build_prompt(parsed: dict, matched_clauses: list) -> str:
+    """Builds the insurance claim reasoning prompt for LLM."""
     user_info = {
         "age": parsed.get("age", "unknown"),
         "procedure": parsed.get("procedure", "unknown"),
@@ -20,12 +24,11 @@ def build_prompt(parsed: dict, matched_clauses: list) -> str:
         "policy_duration": parsed.get("policy_duration", "unknown")
     }
 
-    # Include all matched clauses in full
     clause_summary = [
         {
             "doc_type": c.get("doc_type", ""),
             "source": c.get("source", ""),
-            "text_snippet": c.get("text", "")[:1000]  # Limit per clause to avoid token overflow
+            "text_snippet": c.get("text", "")[:1000]  # avoid token overflow
         }
         for c in matched_clauses
     ]
@@ -58,6 +61,7 @@ Return only valid JSON — no extra text, no markdown.
 
 
 def run_llm_reasoning(parsed: dict, matched_clauses: list) -> dict:
+    """Run the LLM with the built prompt and parse JSON output."""
     prompt = build_prompt(parsed, matched_clauses)
     raw_output = llm.generate(prompt)
 
@@ -76,9 +80,21 @@ def run_llm_reasoning(parsed: dict, matched_clauses: list) -> dict:
         }
 
 
-def reason_over_query(raw_query: str) -> dict:
+def reason_over_query(raw_query: str, doc_id: str, top_k: int = 5) -> dict:
+    """
+    Full reasoning pipeline:
+    1. Parse query into structured fields.
+    2. Retrieve relevant clauses from DB-driven FAISS.
+    3. Run LLM reasoning.
+    """
     parsed = parse_query(raw_query)
-    matched_clauses = retrieve_clauses(parsed, top_k=5)
+
+    # Retrieve relevant chunks from DB for this document
+    matched_texts = retrieve_top_chunks(raw_query, doc_id, top_k=top_k)
+    matched_clauses = [
+        {"text": t, "source": doc_id, "doc_type": "policy"}
+        for t in matched_texts
+    ]
 
     if not matched_clauses:
         return {
@@ -93,11 +109,13 @@ def reason_over_query(raw_query: str) -> dict:
     return result
 
 
-# Alias for Flask app
+# Alias for Flask integration
 decide = reason_over_query
 
-# 🧪 CLI Test
+
+# 🧪 CLI test
 if __name__ == "__main__":
-    query = "46M, knee surgery in Pune, 3-month policy"
+    sample_query = "46M, knee surgery in Pune, 3-month policy"
+    sample_doc_id = "testdoc12345678"  # should exist in DB
     from pprint import pprint
-    pprint(reason_over_query(query))
+    pprint(reason_over_query(sample_query, sample_doc_id))
