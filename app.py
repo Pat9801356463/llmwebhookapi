@@ -15,7 +15,8 @@ app = Flask(__name__)
 gemini_llm = GeminiLLM()
 cohere_llm = CohereLLM()
 
-def extract_text_from_url(url):
+
+def extract_text_from_url(url: str) -> str:
     """Download and extract text from PDF or DOCX URL."""
     try:
         resp = requests.get(url, timeout=15)
@@ -40,16 +41,22 @@ def extract_text_from_url(url):
         print(f"❌ Document extraction failed: {e}")
         return ""
 
-def get_llm_answer(prompt):
-    """Try Gemini first, fallback to Cohere if it fails."""
+
+def get_llm_answer(prompt: str) -> str:
+    """Try Gemini first, fallback to Cohere if it fails or returns error."""
     try:
-        return gemini_llm.generate(prompt)
+        ans = gemini_llm.generate(prompt)
+        if not ans.startswith("❌"):  # Only use if it's a valid Gemini output
+            return ans
+        print(f"⚠️ Gemini returned error — falling back to Cohere: {ans}")
     except Exception as e:
-        print(f"⚠️ Gemini failed: {e} — falling back to Cohere")
-        try:
-            return cohere_llm.generate(prompt)
-        except Exception as e2:
-            return f"Error generating answer: {e2}"
+        print(f"⚠️ Gemini call failed: {e}")
+
+    try:
+        return cohere_llm.generate(prompt)
+    except Exception as e2:
+        return f"Error generating answer: {e2}"
+
 
 @app.route("/hackrx/run", methods=["POST"])
 def hackrx_run():
@@ -89,11 +96,11 @@ def hackrx_run():
             f"Answer concisely and ONLY based on the policy content."
         )
 
-        answer = get_llm_answer(prompt)
-        answers.append(answer.strip())
+        answers.append(get_llm_answer(prompt).strip())
 
     # === 6. Return HackRx format ===
     return jsonify({"answers": answers})
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=False)
