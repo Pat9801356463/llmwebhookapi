@@ -9,6 +9,7 @@ from engine.db import save_chunks_to_db, fetch_chunks_from_db
 # Load embedding model
 EMBEDDING_MODEL = SentenceTransformer(Config.EMBEDDING_MODEL_NAME)
 
+
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> List[str]:
     """Split text into overlapping chunks for embeddings."""
     tokens = text.split()
@@ -19,47 +20,40 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> List[str
             chunks.append(chunk)
     return chunks
 
+
 def embed_chunks(chunks: List[str]) -> np.ndarray:
     """Get embeddings for text chunks."""
     return EMBEDDING_MODEL.encode(chunks, convert_to_numpy=True)
 
-def build_faiss_index(chunks: List[str]) -> Tuple[faiss.IndexFlatL2, dict]:
-    """
-    Build FAISS index from chunks and return index + mapping dict.
-    chunk_map: {idx: text_chunk}
-    """
-    embeddings = embed_chunks(chunks)
+
+def build_faiss_index_from_embeddings(embeddings: np.ndarray) -> faiss.IndexFlatL2:
+    """Build a FAISS index directly from precomputed embeddings."""
     dim = embeddings.shape[1]
     index = faiss.IndexFlatL2(dim)
     index.add(embeddings)
-    chunk_map = {i: chunk for i, chunk in enumerate(chunks)}
-    return index, chunk_map
+    return index
 
-def retrieve_top_chunks(query: str, index: faiss.IndexFlatL2, chunk_map: dict, top_k: int = 3) -> List[str]:
-    """Retrieve most relevant chunks for a query."""
+
+def retrieve_top_chunks(query: str, chunks: List[str], embeddings: np.ndarray, top_k: int = 3) -> List[str]:
+    """
+    Retrieve most relevant chunks for a query given in-memory chunks + embeddings.
+    This avoids re-fetching from DB for every search.
+    """
     query_vec = embed_chunks([query])
+    index = build_faiss_index_from_embeddings(embeddings)
     distances, indices = index.search(query_vec, top_k)
-    return [chunk_map[i] for i in indices[0] if i in chunk_map]
+    return [chunks[i] for i in indices[0] if i < len(chunks)]
 
-# === DB-Aware Wrappers ===
-def process_and_store_document(doc_id: str, text: str, doc_type: str = "policy") -> Tuple[faiss.IndexFlatL2, dict]:
-    """
-    Process text into chunks, store in DB, and return FAISS index + mapping.
-    If doc_id exists in DB, skip embedding and build from DB data.
-    """
-    existing_chunks = fetch_chunks_from_db(doc_id)
-    if existing_chunks:
-        chunks = [row["text"] for row in existing_chunks]
-        embeddings = np.vstack([row["embedding"] for row in existing_chunks])
-        dim = embeddings.shape[1]
-        index = faiss.IndexFlatL2(dim)
-        index.add(embeddings)
-        chunk_map = {i: chunk for i, chunk in enumerate(chunks)}
-        return index, chunk_map
 
-    # New doc — process & save
+def process_and_store_document(doc_id: str, doc_type: str, text: str) -> Tuple[List[str], np.ndarray]:
+    """
+    Process a new document into chunks + embeddings and save to DB.
+    Returns (chunks, embeddings).
+    """
     chunks = chunk_text(text, Config.CHUNK_SIZE, Config.OVERLAP_SIZE)
     embeddings = embed_chunks(chunks)
-    save_chunks_to_db(doc_id, doc_type, chunks, embeddings)
-    index, chunk_map = build_faiss_index(chunks)
-    return index, chunk_map
+    save_chunks_to_db(
+        [{"doc_id": doc_id, "doc_type": doc_type, "chunk_id": i, "text": c} for i, c in enumerate(chunks)],
+        embeddings
+    )
+    return chunks, embeddings
