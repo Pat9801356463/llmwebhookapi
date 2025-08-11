@@ -43,19 +43,23 @@ def extract_text_from_url(url: str) -> str:
 
 
 def get_llm_answer(prompt: str) -> str:
-    """Try Gemini first, fallback to Cohere if it fails or returns error."""
+    """Try Gemini first, fallback to Cohere if it fails or returns error/empty."""
     try:
         ans = gemini_llm.generate(prompt)
-        if not ans.startswith("❌"):  # Only use if it's a valid Gemini output
-            return ans
-        print(f"⚠️ Gemini returned error — falling back to Cohere: {ans}")
+        if ans and not ans.strip().startswith("❌") and ans.strip():
+            return ans.strip()
+        print(f"⚠️ Gemini returned error/empty — falling back to Cohere: {ans}")
     except Exception as e:
         print(f"⚠️ Gemini call failed: {e}")
 
     try:
-        return cohere_llm.generate(prompt)
+        coh_ans = cohere_llm.generate(prompt)
+        if coh_ans and not coh_ans.strip().startswith("❌"):
+            return coh_ans.strip()
+        return f"❌ Cohere returned error: {coh_ans}"
     except Exception as e2:
-        return f"Error generating answer: {e2}"
+        return f"❌ Error generating answer with Cohere: {e2}"
+
 
 
 @app.route("/hackrx/run", methods=["POST"])
