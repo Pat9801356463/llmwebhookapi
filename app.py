@@ -4,12 +4,12 @@ import io
 import hashlib
 import pdfplumber
 import docx
+import numpy as np
 from config import Config
 from engine.gemini_runner import GeminiLLM
 from engine.cohere_runner import CohereLLM
 from engine.faiss_handler import process_and_store_document, retrieve_top_chunks
 from engine.db import fetch_chunks_from_db
-import numpy as np
 
 app = Flask(__name__)
 
@@ -96,7 +96,7 @@ def hackrx_run():
         policy_text = extract_text_from_url(doc_url)
         if not policy_text:
             return jsonify({"error": "Failed to extract document text"}), 500
-        chunks, embeddings = process_and_store_document(doc_id, "policy", policy_text)
+        chunks, embeddings = process_and_store_document(doc_id, "policy", policy_text, source=doc_url)
 
     # === 4. Answer each question ===
     answers = []
