@@ -1,11 +1,12 @@
+# engine/query_parser.py
 import re
 from typing import Dict, Optional
 
 # Regex patterns for key fields
-AGE_PATTERN = re.compile(r'(\d{1,3})\s*[-]?\s*(year\s*old|yo|yr|y/o|M|F)?', re.IGNORECASE)
+AGE_PATTERN = re.compile(r"(\d{1,3})\s*[-]?\s*(year\s*old|yo|yr|y/o|M|F)?", re.IGNORECASE)
 PROCEDURE_PATTERN = re.compile(
     r"(surgery|treatment|operation|therapy|scan|transplant|procedure|hospitalization)",
-    re.IGNORECASE
+    re.IGNORECASE,
 )
 LOCATION_PATTERN = re.compile(r"in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)", re.IGNORECASE)
 DURATION_PATTERN = re.compile(r"(\d+)\s*[-]?\s*(month|year|day)s?", re.IGNORECASE)
@@ -26,7 +27,7 @@ def parse_query(query: str) -> Dict[str, Optional[str]]:
         "gender": None,
         "procedure": None,
         "location": None,
-        "policy_duration": None
+        "policy_duration": None,
     }
 
     # --- Age & Gender ---
@@ -61,12 +62,11 @@ def parse_query(query: str) -> Dict[str, Optional[str]]:
     return result
 
 
-# 🧪 Example usage
 if __name__ == "__main__":
     samples = [
         "46M, knee surgery in Pune, 3-month policy",
         "female 30 yo, MRI scan in New Delhi for 1 year",
-        "65 year old male requires hospitalization in Mumbai for 2 years"
+        "65 year old male requires hospitalization in Mumbai for 2 years",
     ]
     for s in samples:
         print(f"Query: {s}")
