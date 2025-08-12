@@ -16,6 +16,7 @@ pdfminer.six==20231228
 # === NLP / Embedding ===
 sentence-transformers==2.7.0
 transformers==4.43.1
+pinecone-client
 
 # Force precompiled torch CPU wheels
 --extra-index-url https://download.pytorch.org/whl/cpu
