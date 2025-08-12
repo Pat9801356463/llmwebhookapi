@@ -1,91 +1,87 @@
+# faiss_handler.py
 import faiss
 import numpy as np
-from typing import List, Tuple, Dict
+from typing import List, Tuple
 from sentence_transformers import SentenceTransformer
 from config import Config
-from engine.db import save_chunks_to_db, fetch_chunks_from_db
+from pathlib import Path
+import fitz  # PyMuPDF - fast PDF parser
 
-# ===== Singleton Embedding Model =====
-_EMBEDDING_MODEL = None
+# === Global In-Memory Store ===
+_EMBED_MODEL = None
+_FAISS_INDEX = None
+_CHUNKS = []  # text chunks in same order as vectors
 
-
-def get_embedding_model() -> SentenceTransformer:
-    """Load embedding model only once per runtime."""
-    global _EMBEDDING_MODEL
-    if _EMBEDDING_MODEL is None:
-        _EMBEDDING_MODEL = SentenceTransformer(Config.EMBEDDING_MODEL_NAME)
-    return _EMBEDDING_MODEL
-
-
-# ===== In-Memory FAISS Index Store =====
-# Keeps per-document embeddings + chunks for fast retrieval
-_IN_MEMORY_INDEX: Dict[str, Tuple[faiss.IndexFlatL2, List[str]]] = {}
-
+def get_embedding_model():
+    """Load embedding model once."""
+    global _EMBED_MODEL
+    if _EMBED_MODEL is None:
+        _EMBED_MODEL = SentenceTransformer(Config.EMBEDDING_MODEL_NAME)
+    return _EMBED_MODEL
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> List[str]:
-    """Split text into overlapping chunks."""
+    """Split into overlapping chunks."""
     tokens = text.split()
     chunks = []
-    step = max(chunk_size - overlap, 1)
-    for i in range(0, len(tokens), step):
+    for i in range(0, len(tokens), chunk_size - overlap):
         chunk = " ".join(tokens[i:i + chunk_size]).strip()
         if chunk:
             chunks.append(chunk)
     return chunks
 
-
-def embed_chunks(chunks: List[str]) -> np.ndarray:
-    """Generate dense embeddings for text chunks."""
+def embed_texts(texts: List[str]) -> np.ndarray:
+    """Batch encode texts into embeddings."""
     model = get_embedding_model()
-    return model.encode(chunks, convert_to_numpy=True)
+    return model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
 
+def load_pdf_text(pdf_path: str) -> str:
+    """Extract text from PDF."""
+    doc = fitz.open(pdf_path)
+    text = "\n".join(page.get_text("text") for page in doc)
+    return text.strip()
 
-def build_faiss_index(embeddings: np.ndarray) -> faiss.IndexFlatL2:
-    """Create a FAISS index for similarity search."""
+def ingest_pdf_to_memory(pdf_path: str) -> None:
+    """
+    Ingest PDF into in-memory FAISS index for instant querying.
+    """
+    global _FAISS_INDEX, _CHUNKS
+
+    # 1. Parse PDF
+    text = load_pdf_text(pdf_path)
+    # 2. Chunk text
+    chunks = chunk_text(text, Config.CHUNK_SIZE, Config.OVERLAP_SIZE)
+    # 3. Embed all chunks
+    embeddings = embed_texts(chunks)
+
+    # 4. Build FAISS index in memory
     dim = embeddings.shape[1]
     index = faiss.IndexFlatL2(dim)
     index.add(embeddings)
-    return index
 
+    # 5. Store in globals
+    _FAISS_INDEX = index
+    _CHUNKS = chunks
 
-def process_and_store_document(
-    doc_id: str,
-    doc_type: str,
-    text: str,
-    source: str = None
-) -> Tuple[List[str], np.ndarray]:
+def retrieve_top_chunks_batch(queries: List[str], top_k: int = 3) -> List[List[str]]:
     """
-    Chunk → embed → save to DB + in-memory FAISS.
-    Skips recomputation if already in DB.
+    Retrieve top-k chunks for each query in batch mode.
+    Returns: List of results per query.
     """
-    existing = fetch_chunks_from_db(doc_id)
-    if existing:
-        chunks = [c["text"] for c in existing]
-        embeddings = np.vstack([c["embedding"] for c in existing])
-    else:
-        chunks = chunk_text(text, Config.CHUNK_SIZE, Config.OVERLAP_SIZE)
-        embeddings = embed_chunks(chunks)
-        save_chunks_to_db(doc_id, doc_type, chunks, embeddings, source=source)
+    global _FAISS_INDEX, _CHUNKS
+    if _FAISS_INDEX is None:
+        raise ValueError("FAISS index is empty. Call ingest_pdf_to_memory() first.")
 
-    # Always refresh in-memory FAISS for this doc
-    _IN_MEMORY_INDEX[doc_id] = (build_faiss_index(embeddings), chunks)
-    return chunks, embeddings
+    # Embed all queries in one batch
+    query_vecs = embed_texts(queries)
+
+    # Search all queries
+    distances, indices = _FAISS_INDEX.search(query_vecs, top_k)
+
+    results = []
+    for idx_list in indices:
+        result_chunks = [_CHUNKS[i] for i in idx_list if i < len(_CHUNKS)]
+        results.append(result_chunks)
+
+    return results
 
 
-def retrieve_top_chunks(query: str, doc_id: str, top_k: int = 3) -> List[str]:
-    """
-    Retrieve top-K chunks for a query.
-    Uses in-memory FAISS if available, else rebuilds from DB.
-    """
-    if doc_id not in _IN_MEMORY_INDEX:
-        stored_chunks = fetch_chunks_from_db(doc_id)
-        if not stored_chunks:
-            return []
-        chunks = [c["text"] for c in stored_chunks]
-        embeddings = np.vstack([c["embedding"] for c in stored_chunks])
-        _IN_MEMORY_INDEX[doc_id] = (build_faiss_index(embeddings), chunks)
-
-    index, chunks = _IN_MEMORY_INDEX[doc_id]
-    query_vec = embed_chunks([query])
-    distances, indices = index.search(query_vec, top_k)
-    return [chunks[i] for i in indices[0] if 0 <= i < len(chunks)]
