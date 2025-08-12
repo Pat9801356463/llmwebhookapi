@@ -1,8 +1,10 @@
+# engine/db.py
 import psycopg2
 from psycopg2.extras import Json
 from typing import List, Dict, Any
 from config import Config
 import numpy as np
+
 
 def get_connection():
     return psycopg2.connect(
@@ -10,18 +12,22 @@ def get_connection():
         user=Config.DB_USER,
         password=Config.DB_PASSWORD,
         host=Config.DB_HOST,
-        port=Config.DB_PORT
+        port=Config.DB_PORT,
     )
+
 
 def get_embedding_dim():
     """Return embedding dimension for configured model."""
-    return 384  # MiniLM-L6-v2
+    # MiniLM-L6-v2 = 384; keep as metadata if you ever log embeddings here.
+    return 384
+
 
 def create_tables():
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-            cur.execute("""
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS queries (
                     id SERIAL PRIMARY KEY,
                     session_id TEXT,
@@ -33,8 +39,11 @@ def create_tables():
                     matched_clauses JSONB,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
-            """)
-            cur.execute(f"""
+            """
+            )
+            # Keeping this table in case you want hybrid logging or local fallback
+            cur.execute(
+                f"""
                 CREATE TABLE IF NOT EXISTS indexed_chunks (
                     id SERIAL PRIMARY KEY,
                     doc_id TEXT,
@@ -44,64 +53,78 @@ def create_tables():
                     text TEXT,
                     embedding VECTOR({get_embedding_dim()})
                 );
-            """)
+            """
+            )
         conn.commit()
+
 
 def log_user_query(session_id: str, user_query: str, reasoning_result: Dict[str, Any]):
     """Log user query and reasoning result."""
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT INTO queries (
                     session_id, user_query, parsed_query,
                     decision, amount, justification, matched_clauses
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s);
-            """, (
-                session_id,
-                user_query,
-                Json(reasoning_result.get("parsed", {})),
-                reasoning_result.get("decision", "unknown"),
-                reasoning_result.get("amount"),
-                reasoning_result.get("justification"),
-                Json(reasoning_result.get("matched_clauses", []))
-            ))
+            """,
+                (
+                    session_id,
+                    user_query,
+                    Json(reasoning_result.get("parsed", {})),
+                    reasoning_result.get("decision", "unknown"),
+                    # accept either 'payout_amount' or 'amount'
+                    reasoning_result.get("amount", reasoning_result.get("payout_amount")),
+                    reasoning_result.get("justification"),
+                    Json(reasoning_result.get("matched_clauses", [])),
+                ),
+            )
         conn.commit()
 
-def save_chunks_to_db(doc_id: str, doc_type: str, chunks: List[str], embeddings: np.ndarray, source: str = None):
-    """Store chunks + embeddings in DB."""
+
+def save_chunks_to_db(
+    doc_id: str, doc_type: str, chunks: List[str], embeddings: np.ndarray, source: str = None
+):
+    """
+    Optional: Store chunks + embeddings in Postgres (pgvector).
+    Kept for local/hybrid experiments; Pinecone is the primary store.
+    """
     with get_connection() as conn:
         with conn.cursor() as cur:
             for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
-                cur.execute("""
+                cur.execute(
+                    """
                     INSERT INTO indexed_chunks (
                         doc_id, source, doc_type, chunk_id, text, embedding
                     ) VALUES (%s, %s, %s, %s, %s, %s);
-                """, (
-                    doc_id,
-                    source or doc_id,
-                    doc_type,
-                    i,
-                    chunk,
-                    emb.tolist()
-                ))
+                """,
+                    (doc_id, source or doc_id, doc_type, i, chunk, emb.tolist()),
+                )
         conn.commit()
 
+
 def fetch_chunks_from_db(doc_id: str) -> List[Dict[str, Any]]:
-    """Fetch chunks + embeddings for a doc."""
+    """Fetch chunks + embeddings for a doc (local fallback)."""
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT text, embedding
                 FROM indexed_chunks
                 WHERE doc_id = %s
                 ORDER BY chunk_id ASC;
-            """, (doc_id,))
+            """,
+                (doc_id,),
+            )
             rows = cur.fetchall()
 
-    return [
-        {"text": row[0], "embedding": np.array(row[1], dtype=np.float32)}
-        for row in rows
-    ] if rows else []
+    return (
+        [{"text": row[0], "embedding": np.array(row[1], dtype=np.float32)} for row in rows]
+        if rows
+        else []
+    )
+
 
 if __name__ == "__main__":
     create_tables()
