@@ -41,7 +41,6 @@ def create_tables():
                 );
             """
             )
-            # Keeping this table in case you want hybrid logging or local fallback
             cur.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS indexed_chunks (
@@ -74,7 +73,6 @@ def log_user_query(session_id: str, user_query: str, reasoning_result: Dict[str,
                     user_query,
                     Json(reasoning_result.get("parsed", {})),
                     reasoning_result.get("decision", "unknown"),
-                    # accept either 'payout_amount' or 'amount'
                     reasoning_result.get("amount", reasoning_result.get("payout_amount")),
                     reasoning_result.get("justification"),
                     Json(reasoning_result.get("matched_clauses", [])),
@@ -86,10 +84,7 @@ def log_user_query(session_id: str, user_query: str, reasoning_result: Dict[str,
 def save_chunks_to_db(
     doc_id: str, doc_type: str, chunks: List[str], embeddings: np.ndarray, source: str = None
 ):
-    """
-    Optional: Store chunks + embeddings in Postgres (pgvector).
-    Kept for local/hybrid experiments; Pinecone is the primary store.
-    """
+    """Store chunks + embeddings in Postgres (pgvector)."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
@@ -105,7 +100,7 @@ def save_chunks_to_db(
 
 
 def fetch_chunks_from_db(doc_id: str) -> List[Dict[str, Any]]:
-    """Fetch chunks + embeddings for a doc (local fallback)."""
+    """Fetch chunks + embeddings for a specific document."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -118,12 +113,20 @@ def fetch_chunks_from_db(doc_id: str) -> List[Dict[str, Any]]:
                 (doc_id,),
             )
             rows = cur.fetchall()
-
     return (
         [{"text": row[0], "embedding": np.array(row[1], dtype=np.float32)} for row in rows]
         if rows
         else []
     )
+
+
+def get_all_chunks_with_embeddings() -> List[Dict[str, Any]]:
+    """Fetch all chunks + embeddings from DB (for FAISS rebuild)."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT text, embedding FROM indexed_chunks ORDER BY id ASC;")
+            rows = cur.fetchall()
+    return [{"text": row[0], "embedding": np.array(row[1], dtype=np.float32)} for row in rows]
 
 
 if __name__ == "__main__":
