@@ -1,13 +1,24 @@
 # startup.py
-from engine import db, faiss_handler
+import os
+from engine import faiss_handler, db
 
-print("🚀 Starting initialization...")
+def main():
+    # 1. Ensure DB connection works
+    try:
+        db.test_connection()
+        print("✅ Connected to Postgres successfully.")
+    except Exception as e:
+        print(f"❌ Failed to connect to Postgres: {e}")
+        return
 
-print("📦 Ensuring database tables...")
-db.create_tables()
-print("✅ Tables ready.")
+    # 2. Attempt to rebuild FAISS from DB
+    try:
+        if faiss_handler.rebuild_faiss_from_db("default"):
+            print("✅ FAISS index loaded into memory at startup.")
+        else:
+            print("⚠️ No stored FAISS data found. You may need to ingest a PDF.")
+    except Exception as e:
+        print(f"❌ Error rebuilding FAISS index from DB: {e}")
 
-print("📥 Rebuilding FAISS index from DB...")
-faiss_handler.rebuild_faiss_from_db()
-
-print("🚀 Initialization complete. Starting API server...")
+if __name__ == "__main__":
+    main()
