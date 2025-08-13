@@ -1,24 +1,21 @@
 from typing import List, Tuple, Optional
 import numpy as np
-
-from sentence_transformers import SentenceTransformer
+from openai import OpenAI
 from pinecone import Pinecone, ServerlessSpec
 
 from config import Config
 from engine.db import save_chunks_to_db, fetch_chunks_from_db
 
+# --- OpenAI Client ---
+_openai_client: Optional[OpenAI] = None
 
-# --- Embedding model (lazy) ---
-_EMBEDDER: Optional[SentenceTransformer] = None
+def get_openai_client() -> OpenAI:
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = OpenAI(api_key=Config.OPENAI_API_KEY)
+    return _openai_client
 
-
-def get_embedding_model() -> SentenceTransformer:
-    global _EMBEDDER
-    if _EMBEDDER is None:
-        _EMBEDDER = SentenceTransformer(Config.EMBEDDING_MODEL_NAME)
-    return _EMBEDDER
-
-
+# --- Chunking ---
 def chunk_text(text: str, chunk_size: int, overlap: int) -> List[str]:
     """Split text into overlapping chunks (word-based)."""
     tokens = text.split()
@@ -32,17 +29,20 @@ def chunk_text(text: str, chunk_size: int, overlap: int) -> List[str]:
             chunks.append(chunk)
     return chunks
 
-
+# --- Embedding with OpenAI ---
 def embed_chunks(chunks: List[str]) -> np.ndarray:
-    """Generate dense embeddings for chunks."""
-    model = get_embedding_model()
-    return model.encode(chunks, convert_to_numpy=True, normalize_embeddings=True)
+    """Generate dense embeddings for chunks using OpenAI text-embedding-3-large (1024-dim)."""
+    client = get_openai_client()
+    res = client.embeddings.create(
+        input=chunks,
+        model="text-embedding-3-large"
+    )
+    embeddings = [np.array(e.embedding, dtype=np.float32) for e in res.data]
+    return np.vstack(embeddings)
 
-
-# --- Pinecone init / index helper ---
+# --- Pinecone init ---
 def _pc() -> Pinecone:
     return Pinecone(api_key=Config.PINECONE_API_KEY)
-
 
 def _ensure_index():
     pc = _pc()
@@ -50,12 +50,11 @@ def _ensure_index():
     if Config.PINECONE_INDEX_NAME not in indexes:
         pc.create_index(
             name=Config.PINECONE_INDEX_NAME,
-            dimension=Config.EMBEDDING_DIM,
+            dimension=1024,  # fixed for text-embedding-3-large
             metric="cosine",
             spec=ServerlessSpec(cloud="aws", region=Config.PINECONE_ENV.split("-")[0] if "-" in Config.PINECONE_ENV else "us-east-1")
         )
     return pc.Index(Config.PINECONE_INDEX_NAME)
-
 
 # --- Public API ---
 def process_and_index_document(doc_id: str, doc_type: str, text: str, source: str = None) -> Tuple[List[str], np.ndarray]:
@@ -74,11 +73,10 @@ def process_and_index_document(doc_id: str, doc_type: str, text: str, source: st
     else:
         chunks = chunk_text(text, Config.CHUNK_SIZE, Config.OVERLAP_SIZE)
         if not chunks:
-            return [], np.zeros((0, Config.EMBEDDING_DIM), dtype=np.float32)
+            return [], np.zeros((0, 1024), dtype=np.float32)
         embeddings = embed_chunks(chunks)
         save_chunks_to_db(doc_id, doc_type, chunks, embeddings, source=source)
 
-    # Upsert to Pinecone (namespace per doc)
     vectors = [
         {
             "id": f"{doc_id}-{i}",
@@ -93,15 +91,11 @@ def process_and_index_document(doc_id: str, doc_type: str, text: str, source: st
         }
         for i in range(len(chunks))
     ]
-    # Use namespace=doc_id to isolate per-document for faster filtered queries
     index.upsert(vectors=vectors, namespace=doc_id)
     return chunks, embeddings
 
-
 def retrieve_top_chunks(query: str, doc_id: str, top_k: int = 3) -> List[str]:
-    """
-    Query Pinecone for top-K similar chunks within the document namespace.
-    """
+    """Query Pinecone for top-K similar chunks within the document namespace."""
     if not query or not doc_id:
         return []
 
@@ -114,7 +108,6 @@ def retrieve_top_chunks(query: str, doc_id: str, top_k: int = 3) -> List[str]:
         namespace=doc_id
     )
 
-    # pinecone-client v3 returns a dict-like object with "matches"
     matches = getattr(res, "matches", None) or res.get("matches", [])
     texts: List[str] = []
     for m in matches:
