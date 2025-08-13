@@ -1,11 +1,13 @@
+# engine/faiss_handler.py
 import os
 import faiss
 import numpy as np
 from typing import List
 from sentence_transformers import SentenceTransformer
 from config import Config
-import fitz  # PyMuPDF - fast PDF parser
-from engine import db  # ✅ For DB access
+from pathlib import Path
+import fitz  # PyMuPDF
+from engine import db  # ✅ Postgres storage
 
 # === Global In-Memory Store ===
 _EMBED_MODEL = None
@@ -47,7 +49,7 @@ def load_pdf_text(pdf_path: str) -> str:
 
 def ingest_pdf_to_memory(pdf_path: str, doc_id: str = "default", doc_type: str = "pdf", source: str = None) -> None:
     """
-    Ingest PDF into in-memory FAISS index AND save chunks/embeddings to Postgres.
+    Ingest PDF into FAISS index AND save to Postgres.
     """
     global _FAISS_INDEX, _CHUNKS
 
@@ -70,11 +72,40 @@ def ingest_pdf_to_memory(pdf_path: str, doc_id: str = "default", doc_type: str =
         print(f"❌ Failed to save chunks to Postgres: {e}")
 
 
+def rebuild_faiss_from_db(doc_id: str):
+    """
+    Load chunks + embeddings from Postgres and rebuild FAISS index in memory.
+    """
+    global _FAISS_INDEX, _CHUNKS
+
+    records = db.fetch_chunks_from_db(doc_id)
+    if not records:
+        print(f"⚠️ No stored chunks found for doc_id={doc_id}. Cannot rebuild FAISS index.")
+        return False
+
+    _CHUNKS = [rec["text"] for rec in records]
+    embeddings = np.array([rec["embedding"] for rec in records], dtype=np.float32)
+
+    dim = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dim)
+    index.add(embeddings)
+
+    _FAISS_INDEX = index
+    print(f"✅ FAISS index rebuilt from Postgres for doc_id={doc_id} with {len(_CHUNKS)} chunks.")
+    return True
+
+
 def retrieve_top_chunks_batch(queries: List[str], top_k: int = 3) -> List[List[str]]:
-    """Retrieve top-k chunks for each query."""
+    """
+    Retrieve top-k chunks for each query in batch mode.
+    """
     global _FAISS_INDEX, _CHUNKS
     if _FAISS_INDEX is None:
-        raise ValueError("FAISS index is empty. Call ingest_pdf_to_memory() or rebuild_faiss_from_db() first.")
+        # Try to rebuild from Postgres if possible
+        print("ℹ️ FAISS index empty. Attempting rebuild from DB...")
+        # You can change "default" to your preferred default doc_id
+        if not rebuild_faiss_from_db("default"):
+            raise ValueError("FAISS index is empty and no stored data found.")
 
     query_vecs = embed_texts(queries)
     distances, indices = _FAISS_INDEX.search(query_vecs, top_k)
@@ -83,28 +114,21 @@ def retrieve_top_chunks_batch(queries: List[str], top_k: int = 3) -> List[List[s
     for idx_list in indices:
         result_chunks = [_CHUNKS[i] for i in idx_list if i < len(_CHUNKS)]
         results.append(result_chunks)
+
     return results
 
 
-def rebuild_faiss_from_db():
+def ensure_faiss_index():
     """
-    Load all chunks + embeddings from Postgres and build FAISS index in memory.
+    Ensure FAISS index exists on disk.
     """
-    global _FAISS_INDEX, _CHUNKS
+    index_path = getattr(Config, "FAISS_INDEX_PATH", "data/faiss_index.bin")
+    os.makedirs(os.path.dirname(index_path), exist_ok=True)
 
-    chunks_data = db.get_all_chunks_with_embeddings()
-    if not chunks_data:
-        print("⚠️ No chunks found in DB. FAISS index will remain empty.")
-        _FAISS_INDEX = None
-        _CHUNKS = []
-        return
-
-    print(f"🧠 Building FAISS index from {len(chunks_data)} chunks in DB...")
-    embeddings = np.array([c["embedding"] for c in chunks_data], dtype=np.float32)
-    dim = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dim)
-    index.add(embeddings)
-
-    _FAISS_INDEX = index
-    _CHUNKS = [c["text"] for c in chunks_data]
-    print("✅ FAISS index rebuilt from DB.")
+    if not os.path.exists(index_path):
+        dim = Config.EMBEDDING_DIM
+        index = faiss.IndexFlatL2(dim)
+        faiss.write_index(index, index_path)
+        print(f"📂 Created new FAISS index at {index_path}")
+    else:
+        print(f"📂 FAISS index already exists at {index_path}")
