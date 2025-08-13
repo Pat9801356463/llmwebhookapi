@@ -7,6 +7,7 @@ from sentence_transformers import SentenceTransformer
 from config import Config
 from pathlib import Path
 import fitz  # PyMuPDF - fast PDF parser
+from engine import db  # ✅ Added import to save to Postgres
 
 # === Global In-Memory Store ===
 _EMBED_MODEL = None
@@ -46,9 +47,9 @@ def load_pdf_text(pdf_path: str) -> str:
     return text.strip()
 
 
-def ingest_pdf_to_memory(pdf_path: str) -> None:
+def ingest_pdf_to_memory(pdf_path: str, doc_id: str = "default", doc_type: str = "pdf", source: str = None) -> None:
     """
-    Ingest PDF into in-memory FAISS index for instant querying.
+    Ingest PDF into in-memory FAISS index AND save chunks/embeddings to Postgres.
     """
     global _FAISS_INDEX, _CHUNKS
 
@@ -67,6 +68,14 @@ def ingest_pdf_to_memory(pdf_path: str) -> None:
     # 5. Store in globals
     _FAISS_INDEX = index
     _CHUNKS = chunks
+
+    # 6. Save chunks + embeddings to Postgres
+    try:
+        print(f"💾 Saving {len(chunks)} chunks to Postgres for doc_id={doc_id}...")
+        db.save_chunks_to_db(doc_id=doc_id, doc_type=doc_type, chunks=chunks, embeddings=embeddings, source=source)
+        print("✅ Chunks + embeddings saved to Postgres.")
+    except Exception as e:
+        print(f"❌ Failed to save chunks to Postgres: {e}")
 
 
 def retrieve_top_chunks_batch(queries: List[str], top_k: int = 3) -> List[List[str]]:
