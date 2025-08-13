@@ -13,14 +13,13 @@ from engine.reasoner import reason_over_query
 from engine.pinecone_handler import process_and_index_document
 from engine.pdf_loader import extract_text_from_url
 
-
-app = FastAPI(title="Policy LLM API", version="1.0.0")
+app = FastAPI(title="HackRx Policy LLM API", version="1.0.0")
 
 
 # ---------- Models ----------
 class RunRequest(BaseModel):
-    documents: str = Field(..., description="PDF/DOCX blob URL")
-    questions: List[str] = Field(..., description="List of questions")
+    documents: str = Field(..., description="PDF/DOCX URL")
+    questions: List[str] = Field(..., description="List of questions (batch)")
     session_id: Optional[str] = Field(default="anonymous")
 
 
@@ -29,6 +28,7 @@ class RunRequest(BaseModel):
 def on_startup():
     try:
         create_tables()
+        print("✅ Database tables ensured.")
     except Exception as e:
         print(f"⚠️ Failed to ensure tables on startup: {e}")
 
@@ -38,7 +38,7 @@ def on_startup():
 def index():
     return {
         "status": "ok",
-        "message": "Policy LLM API is running",
+        "message": "HackRx Policy LLM API is running",
         "endpoints": ["/hackrx/run", "/health"],
     }
 
@@ -62,10 +62,10 @@ def _auth_check(authorization: Optional[str]):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-# ---------- Main API (Batch) ----------
+# ---------- Main API ----------
 @app.post("/hackrx/run")
 def hackrx_run(payload: RunRequest, Authorization: Optional[str] = Header(None)):
-    # 1) Auth
+    # 1) Auth check
     _auth_check(Authorization)
 
     doc_url = payload.documents
@@ -75,21 +75,27 @@ def hackrx_run(payload: RunRequest, Authorization: Optional[str] = Header(None))
     if not doc_url or not questions:
         raise HTTPException(status_code=400, detail="Missing 'documents' or 'questions'")
 
-    # 2) Ingest once → Pinecone index (namespace = doc_id)
+    # 2) Extract + Ingest into Pinecone (namespace = doc_id)
     doc_id = get_doc_id(doc_url)
     policy_text = extract_text_from_url(doc_url)
     if not policy_text:
         raise HTTPException(status_code=500, detail="Failed to extract document text")
 
-    # Build chunks + embeddings + upsert to Pinecone (idempotent)
-    process_and_index_document(doc_id, "policy", policy_text, source=doc_url)
+    # Chunk + embed + upsert (idempotent upsert)
+    try:
+        process_and_index_document(doc_id, "policy", policy_text, source=doc_url)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Indexing failed: {e}")
 
-    # 3) Answer all questions against the same indexed doc
+    # 3) Loop through questions → Reason → Collect answers
     answers = []
     for q in questions:
-        reasoning_result = reason_over_query(q, doc_id, top_k=3)
+        try:
+            reasoning_result = reason_over_query(q, doc_id, top_k=3)
+        except Exception as e:
+            reasoning_result = {"error": str(e)}
 
-        # Store in DB for traceability
+        # Store query + response in DB (ignore failures)
         try:
             log_user_query(session_id, q, reasoning_result)
         except Exception as e:
