@@ -5,9 +5,8 @@ import numpy as np
 from typing import List
 from sentence_transformers import SentenceTransformer
 from config import Config
-from pathlib import Path
 import fitz  # PyMuPDF
-from engine import db  # ✅ Postgres storage
+from engine import db  # Postgres storage
 
 # === Global In-Memory Store ===
 _EMBED_MODEL = None
@@ -72,7 +71,7 @@ def ingest_pdf_to_memory(pdf_path: str, doc_id: str = "default", doc_type: str =
         print(f"❌ Failed to save chunks to Postgres: {e}")
 
 
-def rebuild_faiss_from_db(doc_id: str):
+def rebuild_faiss_from_db(doc_id: str) -> bool:
     """
     Load chunks + embeddings from Postgres and rebuild FAISS index in memory.
     """
@@ -103,9 +102,8 @@ def retrieve_top_chunks_batch(queries: List[str], top_k: int = 3) -> List[List[s
     if _FAISS_INDEX is None:
         # Try to rebuild from Postgres if possible
         print("ℹ️ FAISS index empty. Attempting rebuild from DB...")
-        # You can change "default" to your preferred default doc_id
         if not rebuild_faiss_from_db("default"):
-            raise ValueError("FAISS index is empty and no stored data found.")
+            raise ValueError("FAISS index is empty and no stored data found for doc_id='default'.")
 
     query_vecs = embed_texts(queries)
     distances, indices = _FAISS_INDEX.search(query_vecs, top_k)
@@ -116,19 +114,3 @@ def retrieve_top_chunks_batch(queries: List[str], top_k: int = 3) -> List[List[s
         results.append(result_chunks)
 
     return results
-
-
-def ensure_faiss_index():
-    """
-    Ensure FAISS index exists on disk.
-    """
-    index_path = getattr(Config, "FAISS_INDEX_PATH", "data/faiss_index.bin")
-    os.makedirs(os.path.dirname(index_path), exist_ok=True)
-
-    if not os.path.exists(index_path):
-        dim = Config.EMBEDDING_DIM
-        index = faiss.IndexFlatL2(dim)
-        faiss.write_index(index, index_path)
-        print(f"📂 Created new FAISS index at {index_path}")
-    else:
-        print(f"📂 FAISS index already exists at {index_path}")
