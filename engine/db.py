@@ -120,8 +120,8 @@ def fetch_chunks_from_db(doc_id: str) -> List[Dict[str, Any]]:
     )
 
 
-def get_all_chunks_with_embeddings() -> List[Dict[str, Any]]:
-    """Fetch all chunks + embeddings from DB (for FAISS rebuild)."""
+def get_all_chunks_with_embeddings():
+    """Fetch ALL chunks + embeddings from the DB."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT text, embedding FROM indexed_chunks ORDER BY id ASC;")
