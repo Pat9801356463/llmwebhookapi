@@ -1,43 +1,40 @@
-# startup.py
-from engine import faiss_handler, db
-from engine.pinecone_handler import process_and_index_document
-from engine.db import get_all_doc_ids, fetch_chunks_from_db
+import os
+import sys
+import numpy as np
 
-def main():
-    try:
-        db.test_connection()
-        print("✅ Connected to Postgres successfully.")
-    except Exception as e:
-        print(f"❌ Failed to connect to Postgres: {e}")
+# Ensure app root is on sys.path
+sys.path.append(os.path.dirname(__file__))
+
+from engine.embedding_handler import upsert_to_pinecone
+from db import fetch_chunks_from_db
+
+def rebuild_pinecone_from_db():
+    print("🚀 Starting Pinecone rebuild from Postgres...")
+
+    chunks = fetch_chunks_from_db()
+    if not chunks:
+        print("⚠️ No chunks found in Postgres. Skipping Pinecone rebuild.")
         return
 
-    try:
-        db.create_tables()
-        print("✅ Tables ensured.")
-    except Exception as e:
-        print(f"❌ Failed to ensure tables: {e}")
+    vectors = []
+    for chunk in chunks:
+        chunk_id = chunk["id"] if isinstance(chunk, dict) else chunk[0]
+        text = chunk["chunk"] if isinstance(chunk, dict) else chunk[1]
+        embedding = chunk["embedding"] if isinstance(chunk, dict) else chunk[2]
 
-    # Rebuild FAISS for 'default' if present
-    try:
-        if faiss_handler.rebuild_faiss_from_db("default"):
-            print("✅ FAISS index loaded into memory at startup.")
-        else:
-            print("⚠️ No stored FAISS data found for doc_id='default'.")
-    except Exception as e:
-        print(f"❌ Error rebuilding FAISS index from DB: {e}")
+        # Ensure embedding is numpy array
+        if not isinstance(embedding, np.ndarray):
+            embedding = np.array(embedding, dtype=np.float32)
 
-    # Optionally re-upsert all docs to Pinecone (safe, idempotent)
-    try:
-        doc_ids = get_all_doc_ids()
-        for doc_id in doc_ids:
-            chunks = fetch_chunks_from_db(doc_id)
-            if not chunks:
-                continue
-            # Reconstruct text from chunks for idempotent process_and_index_document
-            text = " ".join([c["text"] for c in chunks])
-            process_and_index_document(doc_id, "policy", text, source=doc_id)
-        print("✅ Re-upsert to Pinecone attempted for stored docs.")
-    except Exception as e:
+        vectors.append((str(chunk_id), embedding.tolist(), {"text": text}))
+
+    print(f"📦 Preparing to upsert {len(vectors)} vectors into Pinecone...")
+    upsert_to_pinecone(vectors, namespace="default")
+    print("✅ Pinecone rebuild complete.")
+
+if __name__ == "__main__":
+    rebuild_pinecone_from_db()
+
         print(f"⚠️ Skipping Pinecone re-upsert at startup: {e}")
 
 if __name__ == "__main__":
