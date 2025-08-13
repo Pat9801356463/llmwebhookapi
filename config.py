@@ -6,16 +6,15 @@ class Config:
     SECRET_KEY = os.getenv("SECRET_KEY", "replace-this-secret")
 
     # --- Database Config ---
-    # Prefer Railway-provided vars if available
     DB_NAME = os.getenv("PGDATABASE", os.getenv("DB_NAME", "railway"))
     DB_USER = os.getenv("PGUSER", os.getenv("DB_USER", "postgres"))
-    DB_PASSWORD = os.getenv("PGPASSWORD", os.getenv("DB_PASSWORD", "zUCCqLepmlTwrQhxDwpwWnAUvHqbWgkt"))
+    DB_PASSWORD = os.getenv("PGPASSWORD", os.getenv("DB_PASSWORD", "postgres"))
     DB_HOST = os.getenv("PGHOST", os.getenv("DB_HOST", "postgres.railway.internal"))
     DB_PORT = int(os.getenv("PGPORT", os.getenv("DB_PORT", 5432)))
 
     # Unified Postgres URI
     POSTGRES_URI = os.getenv(
-        "DATABASE_URL",  # Railway-provided
+        "DATABASE_URL",
         f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
     )
 
@@ -24,6 +23,8 @@ class Config:
         "EMBEDDING_MODEL_NAME",
         "sentence-transformers/all-MiniLM-L6-v2"
     )
+    # (MiniLM-L6-v2 => 384-dim)
+    EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "384"))
 
     # --- LLM / Local Model Config ---
     LOCAL_MODEL_PATH = os.getenv("LOCAL_MODEL_PATH", "google/flan-t5-base")
@@ -32,17 +33,17 @@ class Config:
     TEMPERATURE = float(os.getenv("TEMPERATURE", 0.3))
 
     # --- LLM Mode Switch ---
-    LLM_MODE = os.getenv("LLM_MODE", "gemini")  
+    LLM_MODE = os.getenv("LLM_MODE", "gemini")
 
     # --- Gemini API Config ---
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyB5tSjidvsJdNW1kRfAaw5pXoSiKe-iubY")
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
     # --- Cohere API Config ---
     COHERE_API_KEY = os.getenv("COHERE_API_KEY", "")
     COHERE_MODEL = os.getenv("COHERE_MODEL", "command-xlarge-nightly")
 
-    # --- Indexer & FAISS ---
+    # --- Chunking ---
     CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 500))
     OVERLAP_SIZE = int(os.getenv("OVERLAP_SIZE", 100))
 
@@ -58,5 +59,9 @@ class Config:
     WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
     # --- HackRx Authentication ---
-    API_KEY = os.getenv("API_KEY", "ce10025c4a5a05ce5776d7c1c8136640412c48de7a7ddcc1c7d80ce1dfb13cff")
+    API_KEY = os.getenv("API_KEY", "")
 
+    # --- Pinecone ---
+    PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
+    PINECONE_ENV = os.getenv("PINECONE_ENV", "us-east-1-aws")
+    PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "policy-llm-index")
