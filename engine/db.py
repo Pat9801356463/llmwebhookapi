@@ -1,10 +1,9 @@
 # engine/db.py
 import psycopg2
-from psycopg2.extras import Json
-from typing import List, Dict, Any
+from psycopg2.extras import Json, DictCursor
+from typing import List, Dict, Any, Optional
 from config import Config
 import numpy as np
-
 
 def get_connection():
     return psycopg2.connect(
@@ -15,19 +14,14 @@ def get_connection():
         port=Config.DB_PORT,
     )
 
-
 def test_connection():
-    """Lightweight connectivity check."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT 1;")
             cur.fetchone()
 
-
 def get_embedding_dim():
-    """Return embedding dimension for configured model (MiniLM-L6-v2 = 384)."""
-    return 384
-
+    return Config.EMBEDDING_DIM
 
 def create_tables():
     with get_connection() as conn:
@@ -45,7 +39,7 @@ def create_tables():
                     matched_clauses JSONB,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
-            """
+                """
             )
             cur.execute(
                 """
@@ -56,15 +50,14 @@ def create_tables():
                     doc_type TEXT,
                     chunk_id INT,
                     text TEXT,
-                    embedding BYTEA
+                    embedding BYTEA,
+                    UNIQUE (doc_id, chunk_id)
                 );
-            """
+                """
             )
         conn.commit()
 
-
 def log_user_query(session_id: str, user_query: str, reasoning_result: Dict[str, Any]):
-    """Log user query and reasoning result."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -73,7 +66,7 @@ def log_user_query(session_id: str, user_query: str, reasoning_result: Dict[str,
                     session_id, user_query, parsed_query,
                     decision, amount, justification, matched_clauses
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s);
-            """,
+                """,
                 (
                     session_id,
                     user_query,
@@ -86,53 +79,49 @@ def log_user_query(session_id: str, user_query: str, reasoning_result: Dict[str,
             )
         conn.commit()
 
-
 def save_chunks_to_db(
-    doc_id: str, doc_type: str, chunks: List[str], embeddings: np.ndarray, source: str = None
+    doc_id: str, doc_type: str, chunks: List[str], embeddings: np.ndarray, source: Optional[str] = None
 ):
-    """
-    Store chunks + embeddings in Postgres (BYTEA format instead of pgvector).
-    """
     with get_connection() as conn:
         with conn.cursor() as cur:
             for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
-                emb_bytes = emb.astype(np.float32).tobytes()
+                emb_bytes = np.asarray(emb, dtype=np.float32).tobytes()
                 cur.execute(
                     """
-                    INSERT INTO indexed_chunks (
-                        doc_id, source, doc_type, chunk_id, text, embedding
-                    ) VALUES (%s, %s, %s, %s, %s, %s);
-                """,
-                    (doc_id, source or doc_id, doc_type, i, chunk, emb_bytes),
+                    INSERT INTO indexed_chunks (doc_id, source, doc_type, chunk_id, text, embedding)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (doc_id, chunk_id) DO UPDATE SET
+                      text = EXCLUDED.text,
+                      embedding = EXCLUDED.embedding,
+                      source = EXCLUDED.source;
+                    """,
+                    (doc_id, source or doc_id, doc_type, i, chunk, psycopg2.Binary(emb_bytes)),
                 )
         conn.commit()
 
-
 def fetch_chunks_from_db(doc_id: str) -> List[Dict[str, Any]]:
-    """Fetch chunks + embeddings from Postgres (decode from BYTEA)."""
     with get_connection() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
             cur.execute(
                 """
                 SELECT text, embedding
                 FROM indexed_chunks
                 WHERE doc_id = %s
                 ORDER BY chunk_id ASC;
-            """,
+                """,
                 (doc_id,),
             )
             rows = cur.fetchall()
-
     if not rows:
         return []
-
-    # psycopg2 returns memoryview for bytea; convert to bytes first
     return [
-        {"text": row[0], "embedding": np.frombuffer(bytes(row[1]), dtype=np.float32)}
+        {"text": row["text"], "embedding": np.frombuffer(bytes(row["embedding"]), dtype=np.float32)}
         for row in rows
     ]
 
-
-if __name__ == "__main__":
-    create_tables()
-    print("✅ Tables ensured.")
+def get_all_doc_ids() -> List[str]:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT doc_id FROM indexed_chunks;")
+            rows = cur.fetchall()
+    return [r[0] for r in rows if r]
