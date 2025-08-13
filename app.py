@@ -51,6 +51,12 @@ def get_doc_id(url: str) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
 
 def _auth_check(authorization: Optional[str]):
+    """
+    Checks API key if set; skips if Config.API_KEY is missing/empty.
+    """
+    if not Config.API_KEY:
+        print("⚠ AUTH CHECK SKIPPED — No API_KEY set in environment")
+        return
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Unauthorized")
     token = authorization.split(" ", 1)[1]
@@ -61,7 +67,7 @@ def _auth_check(authorization: Optional[str]):
 # ---------- Main HackRx Endpoint ----------
 @app.post("/hackrx/run")
 def hackrx_run(payload: RunRequest, Authorization: Optional[str] = Header(None)):
-    # 1) Auth
+    # 1) Auth (skips if no API_KEY in env)
     _auth_check(Authorization)
 
     doc_url = payload.documents
