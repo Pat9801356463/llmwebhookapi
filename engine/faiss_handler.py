@@ -1,7 +1,8 @@
-# faiss_handler.py
+# engine/faiss_handler.py
+import os
 import faiss
 import numpy as np
-from typing import List, Tuple
+from typing import List
 from sentence_transformers import SentenceTransformer
 from config import Config
 from pathlib import Path
@@ -12,12 +13,14 @@ _EMBED_MODEL = None
 _FAISS_INDEX = None
 _CHUNKS = []  # text chunks in same order as vectors
 
+
 def get_embedding_model():
     """Load embedding model once."""
     global _EMBED_MODEL
     if _EMBED_MODEL is None:
         _EMBED_MODEL = SentenceTransformer(Config.EMBEDDING_MODEL_NAME)
     return _EMBED_MODEL
+
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> List[str]:
     """Split into overlapping chunks."""
@@ -29,16 +32,19 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> List[str
             chunks.append(chunk)
     return chunks
 
+
 def embed_texts(texts: List[str]) -> np.ndarray:
     """Batch encode texts into embeddings."""
     model = get_embedding_model()
     return model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
+
 
 def load_pdf_text(pdf_path: str) -> str:
     """Extract text from PDF."""
     doc = fitz.open(pdf_path)
     text = "\n".join(page.get_text("text") for page in doc)
     return text.strip()
+
 
 def ingest_pdf_to_memory(pdf_path: str) -> None:
     """
@@ -61,6 +67,7 @@ def ingest_pdf_to_memory(pdf_path: str) -> None:
     # 5. Store in globals
     _FAISS_INDEX = index
     _CHUNKS = chunks
+
 
 def retrieve_top_chunks_batch(queries: List[str], top_k: int = 3) -> List[List[str]]:
     """
@@ -85,3 +92,18 @@ def retrieve_top_chunks_batch(queries: List[str], top_k: int = 3) -> List[List[s
     return results
 
 
+def ensure_faiss_index():
+    """
+    Ensure FAISS index exists on disk.
+    Creates an empty index if it doesn't exist.
+    """
+    index_path = getattr(Config, "FAISS_INDEX_PATH", "data/faiss_index.bin")
+    os.makedirs(os.path.dirname(index_path), exist_ok=True)
+
+    if not os.path.exists(index_path):
+        dim = Config.EMBEDDING_DIM
+        index = faiss.IndexFlatL2(dim)
+        faiss.write_index(index, index_path)
+        print(f"📂 Created new FAISS index at {index_path}")
+    else:
+        print(f"📂 FAISS index already exists at {index_path}")
