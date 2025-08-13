@@ -20,7 +20,7 @@ sentence-transformers==2.7.0
 transformers==4.43.1
 pinecone-client==3.2.2
 
-# === Torch CPU ===
+# Torch CPU wheels
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.2.2
 accelerate==0.30.1
