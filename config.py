@@ -64,5 +64,5 @@ class Config:
 
     # --- Pinecone ---
     PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
-    PINECONE_ENV = os.getenv("PINECONE_ENV", "us-east-1-aws")
+    PINECONE_ENV = os.getenv("PINECONE_ENV", "gcp_starter")
     PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "policy-llm-index")
