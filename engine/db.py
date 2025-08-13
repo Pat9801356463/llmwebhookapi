@@ -16,9 +16,16 @@ def get_connection():
     )
 
 
+def test_connection():
+    """Lightweight connectivity check."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1;")
+            cur.fetchone()
+
+
 def get_embedding_dim():
-    """Return embedding dimension for configured model."""
-    # MiniLM-L6-v2 = 384; adjust if needed
+    """Return embedding dimension for configured model (MiniLM-L6-v2 = 384)."""
     return 384
 
 
@@ -119,8 +126,9 @@ def fetch_chunks_from_db(doc_id: str) -> List[Dict[str, Any]]:
     if not rows:
         return []
 
+    # psycopg2 returns memoryview for bytea; convert to bytes first
     return [
-        {"text": row[0], "embedding": np.frombuffer(row[1], dtype=np.float32)}
+        {"text": row[0], "embedding": np.frombuffer(bytes(row[1]), dtype=np.float32)}
         for row in rows
     ]
 
