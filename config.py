@@ -1,3 +1,4 @@
+# config.py
 import os
 
 class Config:
@@ -12,7 +13,7 @@ class Config:
     DB_HOST = os.getenv("PGHOST", os.getenv("DB_HOST", "postgres.railway.internal"))
     DB_PORT = int(os.getenv("PGPORT", os.getenv("DB_PORT", 5432)))
 
-    # Unified Postgres URI
+    # Unified Postgres URI (optional)
     POSTGRES_URI = os.getenv(
         "DATABASE_URL",
         f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
