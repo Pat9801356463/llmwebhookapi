@@ -1,49 +1,37 @@
 # startup.py
 import sys
-from engine import db, faiss_handler
-import numpy as np
-import faiss
+from engine import db
+from engine import faiss_handler
 
-def main():
-    print("🚀 Startup script starting...")
+print("🚀 Starting initialization...")
 
-    # 1. Ensure database tables exist
-    try:
-        db.create_tables()
-        print("✅ Database tables ensured.")
-    except Exception as e:
-        print(f"❌ Failed to ensure tables: {e}")
-        sys.exit(1)
+# 1. Ensure Postgres tables exist
+print("📦 Ensuring database tables...")
+db.create_tables()
+print("✅ Tables ready.")
 
-    # 2. Ensure FAISS index file exists
-    try:
-        faiss_handler.ensure_faiss_index()
-    except Exception as e:
-        print(f"❌ Failed to ensure FAISS index file: {e}")
+# 2. Fetch all chunks from DB
+print("📥 Fetching all chunks + embeddings from Postgres...")
+chunks_data = db.get_all_chunks_with_embeddings()
 
-    # 3. Load all chunks + embeddings from Postgres
-    try:
-        records = db.get_all_chunks_with_embeddings()
-        if not records:
-            print("⚠️ No chunks found in Postgres. FAISS index will be empty until a PDF is ingested.")
-            return
+if not chunks_data:
+    print("⚠️ No chunks found in DB. FAISS index will be empty until you ingest documents.")
+    faiss_handler._FAISS_INDEX = None
+    faiss_handler._CHUNKS = []
+else:
+    # 3. Build FAISS index in memory
+    print(f"🧠 Building FAISS index with {len(chunks_data)} chunks...")
+    import faiss
+    import numpy as np
 
-        chunks = [r["chunk"] for r in records]
-        embeddings = np.array([np.frombuffer(r["embedding"], dtype=np.float32) for r in records])
+    embeddings = np.array([c["embedding"] for c in chunks_data], dtype=np.float32)
+    dim = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dim)
+    index.add(embeddings)
 
-        # Build FAISS index in memory
-        dim = embeddings.shape[1]
-        index = faiss.IndexFlatL2(dim)
-        index.add(embeddings)
+    faiss_handler._FAISS_INDEX = index
+    faiss_handler._CHUNKS = [c["text"] for c in chunks_data]
+    print("✅ FAISS index built and ready.")
 
-        # Save in global variables
-        faiss_handler._FAISS_INDEX = index
-        faiss_handler._CHUNKS = chunks
+print("🚀 Initialization complete. Starting API server...")
 
-        print(f"✅ Loaded {len(chunks)} chunks from Postgres into FAISS index.")
-    except Exception as e:
-        print(f"❌ Failed to load chunks from Postgres: {e}")
-
-
-if __name__ == "__main__":
-    main()
