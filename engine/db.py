@@ -18,14 +18,13 @@ def get_connection():
 
 def get_embedding_dim():
     """Return embedding dimension for configured model."""
-    # MiniLM-L6-v2 = 384; keep as metadata if you ever log embeddings here.
+    # MiniLM-L6-v2 = 384; adjust if needed
     return 384
 
 
 def create_tables():
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS queries (
@@ -42,7 +41,7 @@ def create_tables():
             """
             )
             cur.execute(
-                f"""
+                """
                 CREATE TABLE IF NOT EXISTS indexed_chunks (
                     id SERIAL PRIMARY KEY,
                     doc_id TEXT,
@@ -50,7 +49,7 @@ def create_tables():
                     doc_type TEXT,
                     chunk_id INT,
                     text TEXT,
-                    embedding VECTOR({get_embedding_dim()})
+                    embedding BYTEA
                 );
             """
             )
@@ -84,23 +83,26 @@ def log_user_query(session_id: str, user_query: str, reasoning_result: Dict[str,
 def save_chunks_to_db(
     doc_id: str, doc_type: str, chunks: List[str], embeddings: np.ndarray, source: str = None
 ):
-    """Store chunks + embeddings in Postgres (pgvector)."""
+    """
+    Store chunks + embeddings in Postgres (BYTEA format instead of pgvector).
+    """
     with get_connection() as conn:
         with conn.cursor() as cur:
             for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
+                emb_bytes = emb.astype(np.float32).tobytes()
                 cur.execute(
                     """
                     INSERT INTO indexed_chunks (
                         doc_id, source, doc_type, chunk_id, text, embedding
                     ) VALUES (%s, %s, %s, %s, %s, %s);
                 """,
-                    (doc_id, source or doc_id, doc_type, i, chunk, emb.tolist()),
+                    (doc_id, source or doc_id, doc_type, i, chunk, emb_bytes),
                 )
         conn.commit()
 
 
 def fetch_chunks_from_db(doc_id: str) -> List[Dict[str, Any]]:
-    """Fetch chunks + embeddings for a specific document."""
+    """Fetch chunks + embeddings from Postgres (decode from BYTEA)."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -113,20 +115,14 @@ def fetch_chunks_from_db(doc_id: str) -> List[Dict[str, Any]]:
                 (doc_id,),
             )
             rows = cur.fetchall()
-    return (
-        [{"text": row[0], "embedding": np.array(row[1], dtype=np.float32)} for row in rows]
-        if rows
-        else []
-    )
 
+    if not rows:
+        return []
 
-def get_all_chunks_with_embeddings():
-    """Fetch ALL chunks + embeddings from the DB."""
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT text, embedding FROM indexed_chunks ORDER BY id ASC;")
-            rows = cur.fetchall()
-    return [{"text": row[0], "embedding": np.array(row[1], dtype=np.float32)} for row in rows]
+    return [
+        {"text": row[0], "embedding": np.frombuffer(row[1], dtype=np.float32)}
+        for row in rows
+    ]
 
 
 if __name__ == "__main__":
