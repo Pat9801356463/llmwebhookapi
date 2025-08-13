@@ -1,19 +1,15 @@
-# engine/reasoner.py
 import json
 from config import Config
 from engine.query_parser import parse_query
-from engine.pinecone_handler import retrieve_top_chunks  # << Pinecone
-# Local fallback (optional): from engine.faiss_handler import retrieve_top_chunks
-# from engine.db import fetch_chunks_from_db  # no longer needed here
+from engine.pinecone_handler import retrieve_top_chunks  # Pinecone-backed retrieval
+
 
 # === Dynamically select LLM client ===
-if getattr(Config, "LLM_MODE", "local").lower() == "gemini":
+if getattr(Config, "LLM_MODE", "gemini").lower() == "gemini":
     from engine.gemini_runner import GeminiLLM
-
     llm = GeminiLLM()
 else:
     from engine.llm_local_runner import LocalLLM
-
     llm = LocalLLM()
 
 
@@ -50,7 +46,7 @@ You are an insurance claim decision AI.
    justification (string),
    matched_clauses (array of provided clauses),
    query_details (copy of input query details).
-3. If the policy has a waiting period (e.g., "30 days") and the policy duration is greater than that period, 
+3. If the policy has a waiting period (e.g., "30 days") and the policy duration is greater than that period,
    this waiting period should NOT cause rejection — coverage should be approved unless another exclusion applies.
 4. Approve if there is **no explicit exclusion** in the retrieved clauses that matches the procedure or condition.
 5. Reject only if there is **any explicit exclusion** that clearly applies.
@@ -96,12 +92,11 @@ def reason_over_query(raw_query: str, doc_id: str, top_k: int = 5) -> dict:
     """
     Full reasoning pipeline:
     1. Parse query into structured fields.
-    2. Retrieve relevant clauses from Pinecone.
+    2. Retrieve relevant clauses from Pinecone (namespace = doc_id).
     3. Run LLM reasoning.
     """
     parsed = parse_query(raw_query)
 
-    # Retrieve relevant chunks for this document
     matched_texts = retrieve_top_chunks(raw_query, doc_id, top_k=top_k)
     matched_clauses = [{"text": t, "source": doc_id, "doc_type": "policy"} for t in matched_texts]
 
@@ -119,12 +114,11 @@ def reason_over_query(raw_query: str, doc_id: str, top_k: int = 5) -> dict:
     return result
 
 
-# Alias for other modules
+# Alias
 decide = reason_over_query
 
 if __name__ == "__main__":
     sample_query = "46M, knee surgery in Pune, 3-month policy"
     sample_doc_id = "testdoc12345678"
     from pprint import pprint
-
     pprint(reason_over_query(sample_query, sample_doc_id))
