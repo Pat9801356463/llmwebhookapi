@@ -1,4 +1,3 @@
-# app.py
 import hashlib
 from typing import List, Optional
 
@@ -49,7 +48,24 @@ def _require_bearer(auth_header: Optional[str]):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 # -----------------------------
-# Main HackRx Endpoint
+# GET version of /hackrx/run (informational only)
+# -----------------------------
+@app.get("/hackrx/run")
+def hackrx_run_get():
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "message": "This is the HackRx Policy LLM runner. Use POST with an Authorization Bearer token to run processing.",
+            "expected_payload": {
+                "documents": "https://example.com/file.pdf",
+                "questions": ["Question 1", "Question 2"],
+                "session_id": "optional-session-id"
+            }
+        }
+    )
+
+# -----------------------------
+# POST version of /hackrx/run (full processing)
 # -----------------------------
 @app.post("/hackrx/run", response_model=RunResponse)
 def hackrx_run(payload: RunRequest, Authorization: Optional[str] = Header(None)):
@@ -102,6 +118,6 @@ def root():
     return JSONResponse(
         content={
             "message": "HackRx Policy LLM API is running",
-            "endpoints": ["/hackrx/run", "/health", "/details"],
+            "endpoints": ["/hackrx/run (GET|POST)", "/health", "/details"],
         }
     )
