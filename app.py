@@ -1,4 +1,6 @@
+# app.py
 import hashlib
+import json
 from typing import List, Optional
 
 from fastapi import FastAPI, Header, HTTPException
@@ -10,7 +12,7 @@ from engine.db import log_user_query  # safe: will no-op if PG isn't configured
 from engine.pdf_loader import extract_text_from_url
 from engine.pinecone_handler import process_and_index_document
 from engine.reasoner import reason_over_query
-from engine.formatter import format_decision_response
+from engine.formatter import format_decision_response, format_pretty_print
 
 # -----------------------------
 # FastAPI App
@@ -47,25 +49,34 @@ def _require_bearer(auth_header: Optional[str]):
     if not Config.API_KEY or token != Config.API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-# -----------------------------
-# GET version of /hackrx/run (informational only)
-# -----------------------------
-@app.get("/hackrx/run")
-def hackrx_run_get():
-    return JSONResponse(
-        content={
-            "status": "ok",
-            "message": "This is the HackRx Policy LLM runner. Use POST with an Authorization Bearer token to run processing.",
-            "expected_payload": {
-                "documents": "https://example.com/file.pdf",
-                "questions": ["Question 1", "Question 2"],
-                "session_id": "optional-session-id"
-            }
-        }
-    )
+def _to_plain_answer(result: dict) -> str:
+    """
+    Convert the rich reasoning result into a single human-readable string,
+    as required by HackRx (`answers: List[str]`).
+    Priority:
+      1) Use LLM 'justification' if present (best natural sentence).
+      2) Else pretty-print decision bundle.
+      3) Else JSON dump as last resort.
+    """
+    if isinstance(result, dict):
+        if result.get("justification"):
+            return str(result["justification"]).strip()
+        # fallbacks
+        try:
+            pp = format_pretty_print(format_decision_response(result))
+            if pp and isinstance(pp, str):
+                return pp.strip()
+        except Exception:
+            pass
+        try:
+            return json.dumps(result, ensure_ascii=False)
+        except Exception:
+            return "No answer available"
+    # if some model returned a raw string already
+    return str(result)
 
 # -----------------------------
-# POST version of /hackrx/run (full processing)
+# Main HackRx Endpoint
 # -----------------------------
 @app.post("/hackrx/run", response_model=RunResponse)
 def hackrx_run(payload: RunRequest, Authorization: Optional[str] = Header(None)):
@@ -97,8 +108,8 @@ def hackrx_run(payload: RunRequest, Authorization: Optional[str] = Header(None))
         except Exception as e:
             # don't fail user flow for logging errors
             print(f"[warn] failed to log query: {e}")
-        # Convert rich JSON decision into a simple answer string as expected by HackRx
-        answers.append(format_decision_response(result))
+        # 🔑 Convert rich JSON decision into a simple string as required by HackRx
+        answers.append(_to_plain_answer(result))
 
     return RunResponse(answers=answers)
 
@@ -112,6 +123,21 @@ def health():
 @app.get("/details")
 def details():
     return JSONResponse(content={"status": "ok", "info": "Details endpoint reachable"})
+
+# Informational GET for /hackrx/run so you can open it in a browser
+@app.get("/hackrx/run")
+def hackrx_run_info():
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "message": "This is the HackRx Policy LLM runner. Use POST with an Authorization Bearer token to run processing.",
+            "expected_payload": {
+                "documents": "https://example.com/file.pdf",
+                "questions": ["Question 1", "Question 2"],
+                "session_id": "optional-session-id",
+            },
+        }
+    )
 
 @app.get("/")
 def root():
