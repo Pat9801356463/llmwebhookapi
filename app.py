@@ -1,89 +1,88 @@
-# app.py
-from typing import List, Optional
+from fastapi import FastAPI, Request, HTTPException
+from pydantic import BaseModel
+from typing import List
+import requests
+import tempfile
+import os
+import fitz  # PyMuPDF for PDF reading
+import uvicorn
 
-from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+# If you use a vector DB (e.g., Pinecone), import your retrieval logic here
+# from your_retrieval_module import retrieve_answers
 
-from config import Config
-from engine.db import log_user_query
-from engine.reasoner import reason_over_query  # ✅ use new pipeline
+app = FastAPI()
 
-# -----------------------------
-# FastAPI App
-# -----------------------------
-app = FastAPI(
-    title="Banking Assistant API",
-    description="RAG-first banking chatbot with Pinecone + Postgres logging",
-    version="1.0.0"
-)
+# Replace with your expected Bearer token for auth
+API_KEY = os.getenv("HACKRX_API_KEY", "your_api_key_here")
 
-# -----------------------------
-# Request / Response Models
-# -----------------------------
-class QueryRequest(BaseModel):
-    user_id: Optional[str] = Field(None, description="Unique user identifier")
-    query: str = Field(..., description="User's question or statement")
-    doc_id: str = Field(..., description="Document ID or namespace for retrieval")
-    top_k: int = Field(5, description="Number of Pinecone matches to retrieve")
+# -------- Data Models -------- #
+class HackRxRequest(BaseModel):
+    documents: str  # URL to PDF
+    questions: List[str]
 
-class QueryResponse(BaseModel):
-    answer: dict
-    sources: List[dict]
+class HackRxResponse(BaseModel):
+    answers: List[str]
 
-# -----------------------------
-# API Key Verification
-# -----------------------------
-def verify_api_key(api_key: Optional[str]):
-    if Config.API_KEY and api_key != Config.API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+# -------- Helpers -------- #
+def verify_auth(request: Request):
+    """Check Bearer token auth."""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    token = auth_header.split(" ")[1]
+    if token != API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API key")
 
-# -----------------------------
-# Main Query Endpoint
-# -----------------------------
-@app.post("/query", response_model=QueryResponse)
-async def query_endpoint(request: QueryRequest, x_api_key: Optional[str] = Header(None)):
-    verify_api_key(x_api_key)
+def download_pdf(url: str) -> str:
+    """Download PDF from URL to a temp file."""
+    resp = requests.get(url, timeout=15)
+    resp.raise_for_status()
+    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    tmp_file.write(resp.content)
+    tmp_file.close()
+    return tmp_file.name
 
-    # Log query to Postgres
-    if request.user_id:
-        log_user_query(request.user_id, request.query)
+def extract_text_from_pdf(pdf_path: str) -> str:
+    """Extract all text from a PDF."""
+    text = ""
+    with fitz.open(pdf_path) as doc:
+        for page in doc:
+            text += page.get_text()
+    return text
 
-    # Call reasoner directly (handles parse → retrieve → LLM)
-    result = reason_over_query(request.query, request.doc_id, top_k=request.top_k)
+def simple_answer_lookup(pdf_text: str, question: str) -> str:
+    """
+    A placeholder answer generator.
+    Replace with retrieval-augmented generation logic (e.g., vector DB + GPT).
+    """
+    return f"(Stub answer) For question '{question}', please check policy document."
 
-    # Extract sources from result["matched_clauses"]
-    sources = [
-        {
-            "source": clause.get("source"),
-            "doc_type": clause.get("doc_type"),
-            "text": clause.get("text")
-        }
-        for clause in result.get("matched_clauses", [])
-    ]
-
-    return QueryResponse(answer=result, sources=sources)
-
-# -----------------------------
-# Health Check
-# -----------------------------
+# -------- API Endpoints -------- #
 @app.get("/health")
-async def health_check():
-    return JSONResponse(content={"status": "ok"})
+def health_check():
+    return {"status": "ok"}
 
-# -----------------------------
-# Details endpoint for deployment check
-# -----------------------------
-@app.get("/details")
-async def details_check():
-    return JSONResponse(content={"status": "ok", "info": "Details endpoint reachable"})
+@app.post("/hackrx/run", response_model=HackRxResponse)
+async def hackrx_run(request: Request, payload: HackRxRequest):
+    verify_auth(request)
 
-# -----------------------------
-# Root welcome endpoint
-# -----------------------------
-@app.get("/")
-async def root():
-    return JSONResponse(content={
-        "message": "Banking Assistant API is running",
-        "endpoints": ["/health", "/details", "/query"]
-    })
+    try:
+        # Step 1: Download and read PDF
+        pdf_path = download_pdf(payload.documents)
+        pdf_text = extract_text_from_pdf(pdf_path)
+
+        # Step 2: Generate answers
+        answers = [simple_answer_lookup(pdf_text, q) for q in payload.questions]
+
+        # Step 3: Clean up
+        os.remove(pdf_path)
+
+        # Step 4: Return in correct format
+        return {"answers": answers}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# -------- Local Dev Run -------- #
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
