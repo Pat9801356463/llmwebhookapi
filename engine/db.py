@@ -1,110 +1,87 @@
+# engine/db.py
 import os
-import json
-import numpy as np
-from contextlib import contextmanager
+import datetime
 import psycopg2
-from pinecone import Pinecone
-from config import Config
+from psycopg2.extras import RealDictCursor
+from pinecone import Pinecone, ServerlessSpec
 
-# ---------- POSTGRES CONNECTION ----------
-DATABASE_URL = os.getenv("DATABASE_URL")
+# -----------------------------
+# PostgreSQL Connection (Optional Logging)
+# -----------------------------
+PG_CONN = None
 
-@contextmanager
-def get_db_connection():
-    """Context manager to connect to PostgreSQL."""
-    conn = psycopg2.connect(DATABASE_URL)
-    try:
-        yield conn
-    finally:
-        conn.close()
+def get_pg_conn():
+    """Connect to Postgres if DATABASE_URL is set."""
+    global PG_CONN
+    if PG_CONN is None and os.getenv("DATABASE_URL"):
+        PG_CONN = psycopg2.connect(os.getenv("DATABASE_URL"), cursor_factory=RealDictCursor)
+    return PG_CONN
 
-# ---------- PINECONE CONNECTION ----------
-pc = Pinecone(api_key=Config.PINECONE_API_KEY)
-INDEX_NAME = "hack"  # Your new 384-d index
-index = pc.Index(INDEX_NAME)
-
-# Auto fetch the index dimension from Pinecone metadata
-_index_info = pc.describe_index(INDEX_NAME)
-PINECONE_DIM = _index_info.dimension
-
-# ---------- SAVE CHUNKS TO POSTGRES ----------
-def save_chunks_to_db(doc_id, chunks):
-    """
-    Save a list of chunks to PostgreSQL.
-    Each chunk: (chunk_id, content, embedding).
-    """
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            for chunk_id, content, embedding in chunks:
-                cur.execute("""
-                    INSERT INTO chunks (doc_id, chunk_id, content, embedding)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (doc_id, chunk_id)
-                    DO UPDATE SET content = EXCLUDED.content,
-                                  embedding = EXCLUDED.embedding;
-                """, (doc_id, chunk_id, content, json.dumps(embedding)))
-        conn.commit()
-
-# ---------- UPSERT TO PINECONE ----------
-def upsert_to_pinecone(vectors):
-    """
-    Upsert a batch of vectors to Pinecone.
-    Vectors format: [(id, embedding, metadata), ...]
-    """
-    for vid, emb, meta in vectors:
-        if len(emb) != PINECONE_DIM:
-            raise ValueError(
-                f"Embedding dimension mismatch: expected {PINECONE_DIM}, got {len(emb)}"
+def create_tables():
+    """Create tables needed for logging user queries."""
+    conn = get_pg_conn()
+    if not conn:
+        print("⚠ No Postgres connection — skipping table creation")
+        return
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_queries (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT,
+                query TEXT,
+                timestamp TIMESTAMP DEFAULT NOW()
             )
-    index.upsert(vectors=vectors)
-
-# ---------- FETCH CHUNKS FROM POSTGRES ----------
-def fetch_chunks_from_db(doc_id):
-    """Fetch all chunks for a given document ID."""
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT chunk_id, content, embedding
-                FROM chunks
-                WHERE doc_id = %s;
-            """, (doc_id,))
-            rows = cur.fetchall()
-
-    # Convert embedding from stored JSON/text to list
-    processed_rows = []
-    for chunk_id, content, embedding in rows:
-        if isinstance(embedding, str):
-            try:
-                embedding = json.loads(embedding)
-            except json.JSONDecodeError:
-                pass
-        elif isinstance(embedding, memoryview):
-            embedding = np.frombuffer(embedding.tobytes(), dtype=np.float32).tolist()
-        processed_rows.append((chunk_id, content, embedding))
-    return processed_rows
-
-# ---------- PINECONE QUERY ----------
-def query_pinecone(vector, top_k=5):
-    """Query Pinecone with an embedding vector."""
-    if len(vector) != PINECONE_DIM:
-        raise ValueError(
-            f"Query vector dimension mismatch: expected {PINECONE_DIM}, got {len(vector)}"
-        )
-    return index.query(vector=vector, top_k=top_k, include_metadata=True)
-
-# ---------- GET ALL DOC IDS ----------
-def get_all_doc_ids():
-    """Fetch all distinct doc_ids from PostgreSQL."""
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT DISTINCT doc_id FROM chunks;")
-            rows = cur.fetchall()
-            return [row[0] for row in rows]
-
-# ---------- DELETE DOCUMENT ----------
-def delete_document(doc_id):
-    """Delete all chunks for a given document ID from Postgres."""
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM chunks WHERE doc_id = %s;", (doc_id,))
+        """)
         conn.commit()
+    print("✅ Tables ensured in Postgres")
+
+def log_user_query(user_id: str, query: str):
+    """Log a query to Postgres."""
+    conn = get_pg_conn()
+    if not conn:
+        print(f"⚠ No Postgres connection — not logging query: {query}")
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO user_queries (user_id, query, timestamp) VALUES (%s, %s, %s)",
+            (user_id, query, datetime.datetime.utcnow())
+        )
+        conn.commit()
+    print(f"📝 Logged query for user {user_id}")
+
+# -----------------------------
+# Pinecone Setup
+# -----------------------------
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "hack")  # default to your 'hack' index
+
+pc = None
+pinecone_index = None
+
+def init_pinecone():
+    """Initialize Pinecone client and connect to index."""
+    global pc, pinecone_index
+    if not PINECONE_API_KEY:
+        print("⚠ No Pinecone API key set")
+        return
+    try:
+        pc = Pinecone(api_key=PINECONE_API_KEY)
+
+        # Ensure index exists
+        if PINECONE_INDEX_NAME not in [idx["name"] for idx in pc.list_indexes()]:
+            print(f"📌 Creating Pinecone index '{PINECONE_INDEX_NAME}' (384-dim)")
+            pc.create_index(
+                name=PINECONE_INDEX_NAME,
+                dimension=384,
+                metric="cosine",
+                spec=ServerlessSpec(cloud="aws", region="us-east-1")
+            )
+
+        pinecone_index = pc.Index(PINECONE_INDEX_NAME)
+        print(f"✅ Connected to Pinecone index '{PINECONE_INDEX_NAME}'")
+    except Exception as e:
+        print(f"❌ Pinecone init failed: {e}")
+
+# Initialize on import
+create_tables()
+init_pinecone()
