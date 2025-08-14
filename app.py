@@ -7,9 +7,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from config import Config
-from engine.db import log_user_query, pinecone_index  # ✅ Pinecone initialized once in db.py
-from utils.embedder import get_embedding
-from utils.response_generator import generate_final_answer
+from engine import pinecone_index  # ✅ from engine/__init__.py
+from engine.db import log_user_query
+from engine.embedding_handler import embed_chunks
+from engine.reasoner import generate_final_answer  # ✅ real function in your repo
 
 # -----------------------------
 # FastAPI App
@@ -51,7 +52,7 @@ async def query_endpoint(request: QueryRequest, x_api_key: Optional[str] = Heade
         log_user_query(request.user_id, request.query)
 
     # Embed user query
-    query_embedding = get_embedding(request.query)
+    query_embedding = embed_chunks([request.query])[0]  # single query -> single embedding
 
     # Pinecone search
     if not pinecone_index:
@@ -75,7 +76,7 @@ async def query_endpoint(request: QueryRequest, x_api_key: Optional[str] = Heade
             "chunk": chunk_text
         })
 
-    # Generate final answer
+    # Generate final answer using RAG
     answer = generate_final_answer(request.query, "\n".join(context_texts))
 
     return QueryResponse(answer=answer, sources=sources)
