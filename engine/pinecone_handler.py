@@ -18,10 +18,7 @@ def _ensure_index():
             name=Config.PINECONE_INDEX_NAME,
             dimension=Config.EMBEDDING_DIM,
             metric="cosine",
-            spec=ServerlessSpec(
-                cloud="aws",
-                region=Config.PINECONE_ENV.split("-")[0] if "-" in Config.PINECONE_ENV else Config.PINECONE_ENV
-            )
+            spec=ServerlessSpec(cloud="aws", region="us-east-1")
         )
     return pc.Index(Config.PINECONE_INDEX_NAME)
 
@@ -38,16 +35,10 @@ def _pad_or_check_embeddings(embeddings: np.ndarray) -> np.ndarray:
     if cur < target:
         pad = np.zeros((embeddings.shape[0], target - cur), dtype=np.float32)
         return np.concatenate([embeddings.astype(np.float32), pad], axis=1)
-    # truncate if larger
     return embeddings[:, :target].astype(np.float32)
 
 def process_and_index_document(doc_id: str, doc_type: str, text: str, source: str = None) -> Tuple[List[str], np.ndarray]:
-    """
-    Idempotent ingestion:
-      - reuse stored chunks+embeddings if present
-      - else chunk + embed + persist
-      - upsert to Pinecone namespace=doc_id
-    """
+    """Chunk, embed, save to DB, and index in Pinecone."""
     index = _ensure_index()
 
     existing = fetch_chunks_from_db(doc_id)
@@ -62,7 +53,6 @@ def process_and_index_document(doc_id: str, doc_type: str, text: str, source: st
         embeddings = _pad_or_check_embeddings(embeddings)
         save_chunks_to_db(doc_id, doc_type, chunks, embeddings, source=source)
 
-    # Build upsert payload
     vectors = [
         {
             "id": f"{doc_id}-{i}",
@@ -78,18 +68,15 @@ def process_and_index_document(doc_id: str, doc_type: str, text: str, source: st
         for i in range(len(chunks))
     ]
 
-    # Upsert to Pinecone (wrap in try/except)
     try:
-        idx = index
-        idx.upsert(vectors=vectors, namespace=doc_id)
+        index.upsert(vectors=vectors, namespace=doc_id)
     except Exception as e:
-        # Pinecone might be temporarily unavailable; log and continue
         print(f"[WARN] Pinecone upsert failed for doc {doc_id}: {e}")
 
     return chunks, embeddings
 
 def retrieve_top_chunks(query: str, doc_id: str, top_k: int = 3) -> List[str]:
-    """Query Pinecone for top-K similar chunks within the document namespace."""
+    """Query Pinecone for top-K similar chunks."""
     if not query or not doc_id:
         return []
     index = _ensure_index()
@@ -101,9 +88,4 @@ def retrieve_top_chunks(query: str, doc_id: str, top_k: int = 3) -> List[str]:
         print(f"[WARN] Pinecone query failed: {e}")
         return []
     matches = getattr(res, "matches", None) or res.get("matches", [])
-    texts = []
-    for m in matches:
-        md = getattr(m, "metadata", None) or m.get("metadata", {})
-        if md and "text" in md:
-            texts.append(md["text"])
-    return texts
+    return [m.get("metadata", {}).get("text", "") for m in matches if m.get("metadata", {}).get("text")]
