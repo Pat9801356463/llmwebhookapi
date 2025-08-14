@@ -1,215 +1,110 @@
-# engine/db.py
 import os
 import json
 import numpy as np
-import psycopg2
-import psycopg2.extras
 from contextlib import contextmanager
+import psycopg2
+from pinecone import Pinecone
+from config import Config
 
-
-# ---------- CONNECTION ----------
-DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("PG_CONN")
-
+# ---------- POSTGRES CONNECTION ----------
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 @contextmanager
 def get_db_connection():
-    """
-    Context manager for PostgreSQL connection.
-    Ensures connection is closed after use.
-    """
+    """Context manager to connect to PostgreSQL."""
     conn = psycopg2.connect(DATABASE_URL)
     try:
         yield conn
     finally:
         conn.close()
 
+# ---------- PINECONE CONNECTION ----------
+pc = Pinecone(api_key=Config.PINECONE_API_KEY)
+INDEX_NAME = "hack"  # Your new 384-d index
+index = pc.Index(INDEX_NAME)
 
-# ---------- SETUP ----------
-def create_tables():
+# Auto fetch the index dimension from Pinecone metadata
+_index_info = pc.describe_index(INDEX_NAME)
+PINECONE_DIM = _index_info.dimension
+
+# ---------- SAVE CHUNKS TO POSTGRES ----------
+def save_chunks_to_db(doc_id, chunks):
     """
-    Create required tables if not exist:
-      - chunks: stores per-document chunks + embeddings (BYTEA)
-      - queries: optional; for logging user requests (safe no-op if unused)
+    Save a list of chunks to PostgreSQL.
+    Each chunk: (chunk_id, content, embedding).
     """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Chunks table (compatible with your older schema but extended)
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS chunks (
-                    doc_id   TEXT       NOT NULL,
-                    chunk_id INTEGER    NOT NULL,
-                    content  TEXT       NOT NULL,
-                    embedding BYTEA     NOT NULL,
-                    doc_type TEXT,
-                    source   TEXT,
-                    PRIMARY KEY (doc_id, chunk_id)
-                );
-                """
-            )
-
-            # Optional query logs (so app.reasoner/log_user_query don't crash)
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS queries (
-                    id SERIAL PRIMARY KEY,
-                    session_id TEXT,
-                    user_query TEXT,
-                    parsed_query JSONB,
-                    decision TEXT,
-                    amount NUMERIC,
-                    justification TEXT,
-                    matched_clauses JSONB,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                """
-            )
-        conn.commit()
-
-
-def test_connection():
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1;")
-
-
-# ---------- UPSERT CHUNKS ----------
-def save_chunks_to_db(doc_id, doc_type, chunks, embeddings, source=None):
-    """
-    Save a list of text chunks + embeddings to the DB in the 'chunks' table.
-
-    Args:
-      doc_id (str): document identifier
-      doc_type (str): e.g., 'policy'
-      chunks (List[str]): text chunks
-      embeddings (np.ndarray): shape (n, d) float32
-      source (str|None): optional source URL/path
-    """
-    if embeddings is None or len(chunks) == 0:
-        return
-
-    # Ensure numpy array float32
-    if not isinstance(embeddings, np.ndarray):
-        embeddings = np.array(embeddings, dtype=np.float32)
-    else:
-        embeddings = embeddings.astype(np.float32)
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            for i, (content, emb) in enumerate(zip(chunks, embeddings)):
-                emb_bytes = emb.tobytes()  # store as BYTEA
-                cur.execute(
-                    """
-                    INSERT INTO chunks (doc_id, chunk_id, content, embedding, doc_type, source)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+            for chunk_id, content, embedding in chunks:
+                cur.execute("""
+                    INSERT INTO chunks (doc_id, chunk_id, content, embedding)
+                    VALUES (%s, %s, %s, %s)
                     ON CONFLICT (doc_id, chunk_id)
-                    DO UPDATE
-                    SET content = EXCLUDED.content,
-                        embedding = EXCLUDED.embedding,
-                        doc_type = EXCLUDED.doc_type,
-                        source   = EXCLUDED.source;
-                    """,
-                    (doc_id, i, content, psycopg2.Binary(emb_bytes), doc_type, source),
-                )
+                    DO UPDATE SET content = EXCLUDED.content,
+                                  embedding = EXCLUDED.embedding;
+                """, (doc_id, chunk_id, content, json.dumps(embedding)))
         conn.commit()
 
+# ---------- UPSERT TO PINECONE ----------
+def upsert_to_pinecone(vectors):
+    """
+    Upsert a batch of vectors to Pinecone.
+    Vectors format: [(id, embedding, metadata), ...]
+    """
+    for vid, emb, meta in vectors:
+        if len(emb) != PINECONE_DIM:
+            raise ValueError(
+                f"Embedding dimension mismatch: expected {PINECONE_DIM}, got {len(emb)}"
+            )
+    index.upsert(vectors=vectors)
 
-# ---------- FETCH CHUNKS ----------
+# ---------- FETCH CHUNKS FROM POSTGRES ----------
 def fetch_chunks_from_db(doc_id):
-    """
-    Fetch all chunks for a given doc_id.
-    Returns: List[Dict] with keys: 'text', 'embedding' (as list[float])
-    """
-    results = []
+    """Fetch all chunks for a given document ID."""
     with get_db_connection() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """
+        with conn.cursor() as cur:
+            cur.execute("""
                 SELECT chunk_id, content, embedding
                 FROM chunks
-                WHERE doc_id = %s
-                ORDER BY chunk_id ASC;
-                """,
-                (doc_id,),
-            )
+                WHERE doc_id = %s;
+            """, (doc_id,))
             rows = cur.fetchall()
 
-    for row in rows:
-        emb = row["embedding"]
-        # psycopg2 returns memoryview for BYTEA
-        if isinstance(emb, memoryview):
-            emb = np.frombuffer(emb.tobytes(), dtype=np.float32)
-        elif isinstance(emb, (bytes, bytearray)):
-            emb = np.frombuffer(emb, dtype=np.float32)
-        elif isinstance(emb, list):
-            emb = np.array(emb, dtype=np.float32)
-        else:
-            # As a fallback, try JSON
+    # Convert embedding from stored JSON/text to list
+    processed_rows = []
+    for chunk_id, content, embedding in rows:
+        if isinstance(embedding, str):
             try:
-                emb = np.array(json.loads(emb), dtype=np.float32)
-            except Exception:
-                emb = np.array([], dtype=np.float32)
+                embedding = json.loads(embedding)
+            except json.JSONDecodeError:
+                pass
+        elif isinstance(embedding, memoryview):
+            embedding = np.frombuffer(embedding.tobytes(), dtype=np.float32).tolist()
+        processed_rows.append((chunk_id, content, embedding))
+    return processed_rows
 
-        results.append(
-            {
-                "text": row["content"],            # <-- what pinecone_handler expects
-                "embedding": emb.tolist(),         # make JSON/pinecone friendly
-            }
+# ---------- PINECONE QUERY ----------
+def query_pinecone(vector, top_k=5):
+    """Query Pinecone with an embedding vector."""
+    if len(vector) != PINECONE_DIM:
+        raise ValueError(
+            f"Query vector dimension mismatch: expected {PINECONE_DIM}, got {len(vector)}"
         )
-    return results
+    return index.query(vector=vector, top_k=top_k, include_metadata=True)
 
-
-# ---------- UTILS ----------
+# ---------- GET ALL DOC IDS ----------
 def get_all_doc_ids():
-    """
-    Return all distinct doc_id values in the chunks table.
-    """
+    """Fetch all distinct doc_ids from PostgreSQL."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT DISTINCT doc_id FROM chunks;")
             rows = cur.fetchall()
-            return [r[0] for r in rows]
+            return [row[0] for row in rows]
 
-
+# ---------- DELETE DOCUMENT ----------
 def delete_document(doc_id):
-    """
-    Remove all chunks for the given document from DB (does NOT touch Pinecone).
-    """
+    """Delete all chunks for a given document ID from Postgres."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM chunks WHERE doc_id = %s;", (doc_id,))
-        conn.commit()
-
-
-# ---------- OPTIONAL: LOG QUERIES ----------
-def log_user_query(session_id, user_query, reasoning_result: dict):
-    """
-    Safe logger; won't crash if not used.
-    """
-    parsed = reasoning_result.get("parsed", {})
-    decision = reasoning_result.get("decision", "unknown")
-    amount = reasoning_result.get("amount", reasoning_result.get("payout_amount"))
-    justification = reasoning_result.get("justification")
-    matched = reasoning_result.get("matched_clauses", [])
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO queries (
-                    session_id, user_query, parsed_query,
-                    decision, amount, justification, matched_clauses
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s);
-                """,
-                (
-                    session_id,
-                    user_query,
-                    json.dumps(parsed),
-                    decision,
-                    amount,
-                    justification,
-                    json.dumps(matched),
-                ),
-            )
         conn.commit()
