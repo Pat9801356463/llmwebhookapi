@@ -18,18 +18,30 @@ def get_pg_conn():
     return PG_CONN
 
 def create_tables():
-    """Create tables needed for logging user queries."""
+    """Create tables for logging queries and storing chunks."""
     conn = get_pg_conn()
     if not conn:
         print("⚠ No Postgres connection — skipping table creation")
         return
     with conn.cursor() as cur:
+        # For query logs
         cur.execute("""
             CREATE TABLE IF NOT EXISTS user_queries (
                 id SERIAL PRIMARY KEY,
                 user_id TEXT,
                 query TEXT,
                 timestamp TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        # For chunk storage
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS document_chunks (
+                id SERIAL PRIMARY KEY,
+                doc_id TEXT,
+                doc_type TEXT,
+                chunk TEXT,
+                embedding FLOAT8[],
+                source TEXT
             )
         """)
         conn.commit()
@@ -48,6 +60,47 @@ def log_user_query(user_id: str, query: str):
         )
         conn.commit()
     print(f"📝 Logged query for user {user_id}")
+
+# -----------------------------
+# Chunk Storage Helpers
+# -----------------------------
+def save_chunks_to_db(doc_id: str, doc_type: str, chunks, embeddings, source: str = None):
+    """Persist chunks + embeddings to Postgres."""
+    conn = get_pg_conn()
+    if not conn:
+        print("⚠ No Postgres connection — skipping chunk save")
+        return
+    with conn.cursor() as cur:
+        for chunk, emb in zip(chunks, embeddings):
+            cur.execute("""
+                INSERT INTO document_chunks (doc_id, doc_type, chunk, embedding, source)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (doc_id, doc_type, chunk, emb.tolist(), source))
+        conn.commit()
+
+def fetch_chunks_from_db(doc_id: str):
+    """Fetch all chunks for a given document ID."""
+    conn = get_pg_conn()
+    if not conn:
+        return []
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT chunk AS text, embedding
+            FROM document_chunks
+            WHERE doc_id = %s
+            ORDER BY id ASC
+        """, (doc_id,))
+        return cur.fetchall()
+
+def get_all_doc_ids():
+    """Return all distinct document IDs."""
+    conn = get_pg_conn()
+    if not conn:
+        return []
+    with conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT doc_id FROM document_chunks")
+        rows = cur.fetchall()
+        return [row["doc_id"] for row in rows]
 
 # -----------------------------
 # Pinecone Setup
