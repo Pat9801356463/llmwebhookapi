@@ -70,3 +70,20 @@ async def query_endpoint(request: QueryRequest, x_api_key: Optional[str] = Heade
 @app.get("/health")
 async def health_check():
     return JSONResponse(content={"status": "ok"})
+
+# -----------------------------
+# Details endpoint for deployment check
+# -----------------------------
+@app.get("/details")
+async def details_check():
+    return JSONResponse(content={"status": "ok", "info": "Details endpoint reachable"})
+
+# -----------------------------
+# Root welcome endpoint
+# -----------------------------
+@app.get("/")
+async def root():
+    return JSONResponse(content={
+        "message": "Banking Assistant API is running",
+        "endpoints": ["/health", "/details", "/query"]
+    })
