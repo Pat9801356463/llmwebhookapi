@@ -1,88 +1,107 @@
-from fastapi import FastAPI, Request, HTTPException
-from pydantic import BaseModel
-from typing import List
-import requests
-import tempfile
-import os
-import fitz  # PyMuPDF for PDF reading
-import uvicorn
+# app.py
+import hashlib
+from typing import List, Optional
 
-# If you use a vector DB (e.g., Pinecone), import your retrieval logic here
-# from your_retrieval_module import retrieve_answers
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
-app = FastAPI()
+from config import Config
+from engine.db import log_user_query  # safe: will no-op if PG isn't configured
+from engine.pdf_loader import extract_text_from_url
+from engine.pinecone_handler import process_and_index_document
+from engine.reasoner import reason_over_query
+from engine.formatter import format_decision_response
 
-# Replace with your expected Bearer token for auth
-API_KEY = os.getenv("HACKRX_API_KEY", "your_api_key_here")
+# -----------------------------
+# FastAPI App
+# -----------------------------
+app = FastAPI(
+    title="HackRx Policy LLM API",
+    description="RAG-first policy QA with Pinecone + Postgres logging",
+    version="1.0.0",
+)
 
-# -------- Data Models -------- #
-class HackRxRequest(BaseModel):
-    documents: str  # URL to PDF
-    questions: List[str]
+# -----------------------------
+# Models
+# -----------------------------
+class RunRequest(BaseModel):
+    documents: str = Field(..., description="Public PDF/DOCX URL (blob link)")
+    questions: List[str] = Field(..., description="List of questions to answer")
+    session_id: Optional[str] = Field(default="anonymous", description="Session/user id for logging")
 
-class HackRxResponse(BaseModel):
+class RunResponse(BaseModel):
     answers: List[str]
 
-# -------- Helpers -------- #
-def verify_auth(request: Request):
-    """Check Bearer token auth."""
-    auth_header = request.headers.get("Authorization")
+# -----------------------------
+# Helpers
+# -----------------------------
+def _doc_id_from_url(url: str) -> str:
+    # short stable namespace for Pinecone
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+
+def _require_bearer(auth_header: Optional[str]):
+    """Strict Bearer auth for HackRx runner."""
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Unauthorized")
-    token = auth_header.split(" ")[1]
-    if token != API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid API key")
+    token = auth_header.split(" ", 1)[1].strip()
+    if not Config.API_KEY or token != Config.API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
-def download_pdf(url: str) -> str:
-    """Download PDF from URL to a temp file."""
-    resp = requests.get(url, timeout=15)
-    resp.raise_for_status()
-    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    tmp_file.write(resp.content)
-    tmp_file.close()
-    return tmp_file.name
+# -----------------------------
+# Main HackRx Endpoint
+# -----------------------------
+@app.post("/hackrx/run", response_model=RunResponse)
+def hackrx_run(payload: RunRequest, Authorization: Optional[str] = Header(None)):
+    # 1) Auth
+    _require_bearer(Authorization)
 
-def extract_text_from_pdf(pdf_path: str) -> str:
-    """Extract all text from a PDF."""
-    text = ""
-    with fitz.open(pdf_path) as doc:
-        for page in doc:
-            text += page.get_text()
-    return text
+    # 2) Validate input
+    if not payload.documents or not payload.questions:
+        raise HTTPException(status_code=400, detail="Missing 'documents' or 'questions'")
 
-def simple_answer_lookup(pdf_text: str, question: str) -> str:
-    """
-    A placeholder answer generator.
-    Replace with retrieval-augmented generation logic (e.g., vector DB + GPT).
-    """
-    return f"(Stub answer) For question '{question}', please check policy document."
+    # 3) Generate doc namespace & fetch text
+    doc_url = payload.documents
+    doc_id = _doc_id_from_url(doc_url)
 
-# -------- API Endpoints -------- #
+    policy_text = extract_text_from_url(doc_url)
+    if not policy_text:
+        raise HTTPException(status_code=500, detail="Failed to fetch/parse document text")
+
+    # 4) Ingest (idempotent): chunk, embed, persist, upsert to Pinecone (namespace=doc_id)
+    process_and_index_document(doc_id, doc_type="policy", text=policy_text, source=doc_url)
+
+    # 5) Answer all questions via pipeline (parse → retrieve → reason)
+    answers: List[str] = []
+    for q in payload.questions:
+        result = reason_over_query(q, doc_id=doc_id, top_k=5)
+        # optional logging to Postgres (no-op if DB not configured)
+        try:
+            log_user_query(payload.session_id or "anonymous", q)
+        except Exception as e:
+            # don't fail user flow for logging errors
+            print(f"[warn] failed to log query: {e}")
+        # Convert rich JSON decision into a simple answer string as expected by HackRx
+        answers.append(format_decision_response(result))
+
+    return RunResponse(answers=answers)
+
+# -----------------------------
+# Health / Details / Root
+# -----------------------------
 @app.get("/health")
-def health_check():
-    return {"status": "ok"}
+def health():
+    return JSONResponse(content={"status": "ok"})
 
-@app.post("/hackrx/run", response_model=HackRxResponse)
-async def hackrx_run(request: Request, payload: HackRxRequest):
-    verify_auth(request)
+@app.get("/details")
+def details():
+    return JSONResponse(content={"status": "ok", "info": "Details endpoint reachable"})
 
-    try:
-        # Step 1: Download and read PDF
-        pdf_path = download_pdf(payload.documents)
-        pdf_text = extract_text_from_pdf(pdf_path)
-
-        # Step 2: Generate answers
-        answers = [simple_answer_lookup(pdf_text, q) for q in payload.questions]
-
-        # Step 3: Clean up
-        os.remove(pdf_path)
-
-        # Step 4: Return in correct format
-        return {"answers": answers}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# -------- Local Dev Run -------- #
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.get("/")
+def root():
+    return JSONResponse(
+        content={
+            "message": "HackRx Policy LLM API is running",
+            "endpoints": ["/hackrx/run", "/health", "/details"],
+        }
+    )
