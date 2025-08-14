@@ -1,98 +1,89 @@
 # app.py
 import hashlib
 from typing import List, Optional
+
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from config import Config
-from engine.db import create_tables, log_user_query
-from engine.formatter import format_decision_response
-from engine.reasoner import reason_over_query
-from engine.pinecone_handler import process_and_index_document
-from engine.pdf_loader import extract_text_from_url
+from engine.db import log_user_query, pinecone_index  # ✅ Pinecone initialized once in db.py
+from utils.embedder import get_embedding
+from utils.response_generator import generate_final_answer
 
-app = FastAPI(title="HackRx Policy LLM API", version="1.0.0")
+# -----------------------------
+# FastAPI App
+# -----------------------------
+app = FastAPI(
+    title="Banking Assistant API",
+    description="RAG-first banking chatbot with Pinecone + Postgres logging",
+    version="1.0.0"
+)
 
+# -----------------------------
+# Request / Response Models
+# -----------------------------
+class QueryRequest(BaseModel):
+    user_id: Optional[str] = Field(None, description="Unique user identifier")
+    query: str = Field(..., description="User's question or statement")
+    top_k: int = Field(5, description="Number of Pinecone matches to retrieve")
 
-# ---------- Models ----------
-class RunRequest(BaseModel):
-    documents: str = Field(..., description="PDF/DOCX blob URL")
-    questions: List[str] = Field(..., description="List of questions")
-    session_id: Optional[str] = Field(default="anonymous")
+class QueryResponse(BaseModel):
+    answer: str
+    sources: List[dict]
 
+# -----------------------------
+# API Key Verification
+# -----------------------------
+def verify_api_key(api_key: Optional[str]):
+    if Config.API_KEY and api_key != Config.API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
 
-# ---------- Startup ----------
-@app.on_event("startup")
-def on_startup():
-    try:
-        create_tables()
-    except Exception as e:
-        print(f"⚠️ Failed to ensure tables on startup: {e}")
+# -----------------------------
+# Main Query Endpoint
+# -----------------------------
+@app.post("/query", response_model=QueryResponse)
+async def query_endpoint(request: QueryRequest, x_api_key: Optional[str] = Header(None)):
+    verify_api_key(x_api_key)
 
+    # Log query to Postgres
+    if request.user_id:
+        log_user_query(request.user_id, request.query)
 
-# ---------- Health ----------
-@app.get("/")
-def index():
-    return {
-        "status": "ok",
-        "message": "HackRx Policy LLM API is running",
-        "endpoints": ["/hackrx/run", "/health"],
-    }
+    # Embed user query
+    query_embedding = get_embedding(request.query)
 
+    # Pinecone search
+    if not pinecone_index:
+        raise HTTPException(status_code=500, detail="Pinecone not initialized")
+
+    search_results = pinecone_index.query(
+        vector=query_embedding,
+        top_k=request.top_k,
+        include_metadata=True
+    )
+
+    # Prepare context
+    sources = []
+    context_texts = []
+    for match in search_results.get("matches", []):
+        chunk_text = match["metadata"].get("chunk", "")
+        context_texts.append(chunk_text)
+        sources.append({
+            "id": match["id"],
+            "score": match["score"],
+            "chunk": chunk_text
+        })
+
+    # Generate final answer
+    answer = generate_final_answer(request.query, "\n".join(context_texts))
+
+    return QueryResponse(answer=answer, sources=sources)
+
+# -----------------------------
+# Health Check
+# -----------------------------
 @app.get("/health")
-def health():
-    return {"status": "healthy"}
+async def health_check():
+    return JSONResponse(content={"status": "ok"})
 
-
-# ---------- Utils ----------
-def get_doc_id(url: str) -> str:
-    """Generate a short SHA-256 doc_id from URL."""
-    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
-
-def _auth_check(authorization: Optional[str]):
-    """
-    Checks API key if set; skips if Config.API_KEY is missing/empty.
-    """
-    if not Config.API_KEY:
-        print("⚠ AUTH CHECK SKIPPED — No API_KEY set in environment")
-        return
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    token = authorization.split(" ", 1)[1]
-    if token != Config.API_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-
-# ---------- Main HackRx Endpoint ----------
-@app.post("/hackrx/run")
-def hackrx_run(payload: RunRequest, Authorization: Optional[str] = Header(None)):
-    # 1) Auth (skips if no API_KEY in env)
-    _auth_check(Authorization)
-
-    doc_url = payload.documents
-    questions = payload.questions or []
-    session_id = payload.session_id or "anonymous"
-
-    if not doc_url or not questions:
-        raise HTTPException(status_code=400, detail="Missing 'documents' or 'questions'")
-
-    # 2) Ingest PDF into Pinecone
-    doc_id = get_doc_id(doc_url)
-    policy_text = extract_text_from_url(doc_url)
-    if not policy_text:
-        raise HTTPException(status_code=500, detail="Failed to extract document text")
-
-    process_and_index_document(doc_id, "policy", policy_text, source=doc_url)
-
-    # 3) Batch answer all questions
-    answers = []
-    for q in questions:
-        reasoning_result = reason_over_query(q, doc_id, top_k=3)
-        try:
-            log_user_query(session_id, q, reasoning_result)
-        except Exception as e:
-            print(f"⚠️ Failed to log query: {e}")
-        answers.append(format_decision_response(reasoning_result))
-
-    return JSONResponse(content={"answers": answers})
