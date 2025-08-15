@@ -5,6 +5,7 @@ from pinecone import Pinecone, ServerlessSpec
 from config import Config
 from engine.db import save_chunks_to_db, fetch_chunks_from_db
 from engine.embedding_handler import chunk_text, embed_chunks
+from functools import lru_cache
 
 # -----------------------------
 # Pinecone client / index (v3)
@@ -74,7 +75,7 @@ def process_and_index_document(doc_id: str, doc_type: str, text: str, source: st
         except Exception as e:
             print(f"[warn] Failed to save chunks to DB for {doc_id}: {e}")
 
-    # 4) Upsert into Pinecone (values from `embeddings`, metadata contains text)
+    # 4) Upsert into Pinecone
     vectors = []
     for i in range(len(chunks)):
         vec = embeddings[i].tolist() if embeddings.shape[0] > i else [0.0] * Config.EMBEDDING_DIM
@@ -99,9 +100,10 @@ def process_and_index_document(doc_id: str, doc_type: str, text: str, source: st
     return chunks
 
 
+@lru_cache(maxsize=512)
 def retrieve_top_chunks(query: str, doc_id: str, top_k: int = 3) -> List[str]:
     """
-    Query Pinecone and return the top-k chunk texts.
+    Cached retrieval: Query Pinecone and return the top-k chunk texts.
     Requests include_values=True to allow local re-ranking.
     Falls back to score-only order if values are absent/empty.
     """
@@ -116,13 +118,13 @@ def retrieve_top_chunks(query: str, doc_id: str, top_k: int = 3) -> List[str]:
         return []
     q_vec = q_vec[0]
 
-    # Query Pinecone
+    # Query Pinecone (reduced candidate pool to speed up)
     try:
         res = _pc_index.query(
             vector=q_vec.tolist(),
-            top_k=max(top_k * 3, 9),     # widen candidate pool for better recall
+            top_k=max(top_k * 2, 6),     # smaller candidate pool
             include_metadata=True,
-            include_values=True,          # IMPORTANT: request values back
+            include_values=True,
             namespace=doc_id
         )
     except Exception as e:
@@ -149,7 +151,7 @@ def retrieve_top_chunks(query: str, doc_id: str, top_k: int = 3) -> List[str]:
     if not candidates:
         return []
 
-    # Local rerank if any values present; otherwise use Pinecone score
+    # Local rerank
     def _cosine(a: np.ndarray, b_in):
         b = _pad_or_check_embeddings(np.array(b_in, dtype=np.float32))
         if b.size == 0:
@@ -165,11 +167,11 @@ def retrieve_top_chunks(query: str, doc_id: str, top_k: int = 3) -> List[str]:
     else:
         ranked = sorted(candidates, key=lambda x: x[2], reverse=True)
 
-    # Deduplicate by text, keep order
+    # Deduplicate
     seen = set()
     ordered_texts = []
     for txt, _, _ in ranked:
-        key = txt[:512]  # cheap hash key by prefix
+        key = txt[:512]
         if key in seen:
             continue
         seen.add(key)
