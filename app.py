@@ -19,15 +19,11 @@ from engine.embedding_handler import embed_chunks  # force load model at startup
 try:
     import pytesseract
     from pdf2image import convert_from_bytes
-    from PIL import Image
 except ImportError:
     pytesseract = None
 
-# ✅ Cache to avoid reprocessing the same document repeatedly
 _doc_cache = {}
-
-# Pre-load embedder at startup (avoids first request delay)
-_ = embed_chunks(["warmup model load"])
+_ = embed_chunks(["warmup model load"])  # warmup embedder
 
 app = FastAPI(
     title="HackRx Policy LLM API",
@@ -54,7 +50,6 @@ def _require_bearer(auth_header: Optional[str]):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 def _to_plain_answer(result) -> str:
-    """Ensure we always return a clean string answer."""
     try:
         if isinstance(result, dict):
             if result.get("justification"):
@@ -68,16 +63,12 @@ def _to_plain_answer(result) -> str:
         return "No answer available"
 
 def _ocr_extract_from_pdf(pdf_bytes: bytes) -> str:
-    """Fallback OCR extraction for scanned PDFs."""
     if not pytesseract:
-        print("[error] OCR dependencies not installed. Run: pip install pytesseract pillow pdf2image")
+        print("[error] OCR dependencies not installed.")
         return ""
     try:
         images = convert_from_bytes(pdf_bytes)
-        text_parts = []
-        for img in images:
-            text_parts.append(pytesseract.image_to_string(img))
-        return "\n".join(text_parts)
+        return "\n".join(pytesseract.image_to_string(img) for img in images)
     except Exception as e:
         print(f"[error] OCR extraction failed: {e}")
         return ""
@@ -94,30 +85,22 @@ def hackrx_run(payload: RunRequest, Authorization: Optional[str] = Header(None))
 
     try:
         if doc_id not in _doc_cache:
-            # Step 1: Extract text
             policy_text = extract_text_from_url(doc_url)
-            print(f"[debug] Extracted text length: {len(policy_text) if policy_text else 0}")
-
-            # Step 2: OCR fallback if empty
-            if not policy_text or len(policy_text.strip()) == 0:
-                print("[info] PDF extraction returned empty text! Attempting OCR...")
+            if not policy_text.strip():
+                print("[info] Empty text from PDF — trying OCR fallback.")
                 try:
                     import requests
                     pdf_bytes = requests.get(doc_url, timeout=30).content
                     policy_text = _ocr_extract_from_pdf(pdf_bytes)
-                    print(f"[debug] OCR extracted text length: {len(policy_text)}")
                 except Exception as e:
-                    print(f"[error] Failed to download or OCR PDF: {e}")
+                    print(f"[error] OCR download failed: {e}")
 
-            if not policy_text or len(policy_text.strip()) == 0:
-                raise HTTPException(status_code=500, detail="Failed to fetch/parse document text (even with OCR)")
+            if not policy_text.strip():
+                raise HTTPException(status_code=500, detail="Failed to extract text from document.")
 
-            # Step 3: Index document
-            chunks = process_and_index_document(doc_id, doc_type="policy", text=policy_text, source=doc_url)
-            print(f"[debug] Processing {doc_id}, chunks before embedding: {len(chunks) if chunks else 0}")
-            if not chunks or all(len(c.strip()) == 0 for c in chunks):
-                print("[error] No valid chunks found to index.")
-
+            chunks = process_and_index_document(doc_id, "policy", policy_text, doc_url)
+            if not chunks or all(not c.strip() for c in chunks):
+                print("[warn] No chunks to index.")
             _doc_cache[doc_id] = True
 
         answers: List[str] = []
@@ -125,48 +108,47 @@ def hackrx_run(payload: RunRequest, Authorization: Optional[str] = Header(None))
             try:
                 result = reason_over_query(q, doc_id=doc_id, top_k=5)
                 if not result or (isinstance(result, dict) and not result.get("matches")):
-                    print(f"[warn] No matches found for: {q}")
                     result = {"justification": "No relevant information found in document"}
-            except Exception as e:
-                result = f"Error processing question: {str(e)}"
-                print(f"[error] reason_over_query failed: {traceback.format_exc()}")
+            except Exception:
+                result = {"justification": "Error processing question"}
+                print(f"[error] reason_over_query failed:\n{traceback.format_exc()}")
             try:
                 log_user_query(payload.session_id or "anonymous", q)
             except Exception as e:
-                print(f"[warn] failed to log query: {e}")
+                print(f"[warn] Failed to log query: {e}")
             answers.append(_to_plain_answer(result))
 
         return RunResponse(answers=answers)
 
     except HTTPException:
         raise
-    except Exception as e:
-        print(f"[fatal] Internal server error: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+    except Exception:
+        print(f"[fatal] Internal server error:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @app.get("/health")
 def health():
-    return JSONResponse(content={"status": "ok"})
+    return {"status": "ok"}
 
 @app.get("/details")
 def details():
-    return JSONResponse(content={"status": "ok", "info": "Details endpoint reachable"})
+    return {"status": "ok", "info": "Details endpoint reachable"}
 
 @app.get("/hackrx/run")
 def hackrx_run_info():
-    return JSONResponse(content={
+    return {
         "status": "ok",
-        "message": "This is the HackRx Policy LLM runner. Use POST with an Authorization Bearer token to run processing.",
+        "message": "HackRx Policy LLM runner. Use POST with Bearer token.",
         "expected_payload": {
             "documents": "https://example.com/file.pdf",
             "questions": ["Question 1", "Question 2"],
             "session_id": "optional-session-id",
         },
-    })
+    }
 
 @app.get("/")
 def root():
-    return JSONResponse(content={
+    return {
         "message": "HackRx Policy LLM API is running",
         "endpoints": ["/hackrx/run (GET|POST)", "/health", "/details"],
-    })
+    }
