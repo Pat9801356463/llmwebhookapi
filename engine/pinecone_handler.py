@@ -1,4 +1,3 @@
-# engine/pinecone_handler.py
 from typing import List, Tuple
 import numpy as np
 from pinecone import Pinecone, ServerlessSpec
@@ -6,9 +5,6 @@ from config import Config
 from engine.db import save_chunks_to_db, fetch_chunks_from_db
 from engine.embedding_handler import chunk_text, embed_chunks
 
-# -----------------------------
-# Global Pinecone client/index
-# -----------------------------
 _pc_client = Pinecone(api_key=Config.PINECONE_API_KEY)
 _indexes = {i["name"]: i for i in _pc_client.list_indexes()}
 if Config.PINECONE_INDEX_NAME not in _indexes:
@@ -76,10 +72,13 @@ def retrieve_top_chunks(query: str, doc_id: str, top_k: int = 3) -> List[str]:
     if not query or not doc_id:
         return []
     q_vec = embed_chunks([query])
-    q_vec = _pad_or_check_embeddings(q_vec)[0]
+    q_vec = _pad_or_check_embeddings(q_vec)
+    if q_vec.size == 0:
+        print(f"[warn] Query embedding is empty for query='{query}'")
+        return []
+    q_vec = q_vec[0]
 
     try:
-        # Pull extra candidates for reranking
         res = _pc_index.query(
             vector=q_vec.tolist(),
             top_k=max(top_k * 2, 6),
@@ -91,13 +90,20 @@ def retrieve_top_chunks(query: str, doc_id: str, top_k: int = 3) -> List[str]:
         return []
 
     matches = getattr(res, "matches", None) or res.get("matches", [])
-    candidates = [(m.get("metadata", {}).get("text", ""), np.array(m["values"], dtype=np.float32))
-                  for m in matches if m.get("metadata", {}).get("text")]
+    candidates = []
+    for idx, m in enumerate(matches):
+        txt = m.get("metadata", {}).get("text")
+        vals = np.array(m.get("values") or [], dtype=np.float32)
+        if not txt:
+            continue
+        if vals.size == 0:
+            print(f"[warn] Skipping empty embedding from Pinecone match {idx}")
+            continue
+        candidates.append((txt, vals))
 
     if not candidates:
         return []
 
-    # Local rerank by cosine similarity
     def cosine(a, b):
         return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8)
 
