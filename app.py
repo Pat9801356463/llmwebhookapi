@@ -2,9 +2,11 @@ import hashlib
 import json
 import traceback
 from typing import List, Optional
+
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
 from config import Config
 from engine.db import log_user_query
 from engine.pdf_loader import extract_text_from_url
@@ -12,6 +14,14 @@ from engine.pinecone_handler import process_and_index_document
 from engine.reasoner import reason_over_query
 from engine.formatter import format_decision_response, format_pretty_print
 from engine.embedding_handler import embed_chunks  # force load model at startup
+
+# OCR fallback imports
+try:
+    import pytesseract
+    from pdf2image import convert_from_bytes
+    from PIL import Image
+except ImportError:
+    pytesseract = None
 
 # ✅ Cache to avoid reprocessing the same document repeatedly
 _doc_cache = {}
@@ -22,7 +32,7 @@ _ = embed_chunks(["warmup model load"])
 app = FastAPI(
     title="HackRx Policy LLM API",
     description="RAG-first policy QA with Pinecone + Postgres logging",
-    version="1.0.1",
+    version="1.1.0",
 )
 
 class RunRequest(BaseModel):
@@ -57,6 +67,21 @@ def _to_plain_answer(result) -> str:
     except Exception:
         return "No answer available"
 
+def _ocr_extract_from_pdf(pdf_bytes: bytes) -> str:
+    """Fallback OCR extraction for scanned PDFs."""
+    if not pytesseract:
+        print("[error] OCR dependencies not installed. Run: pip install pytesseract pillow pdf2image")
+        return ""
+    try:
+        images = convert_from_bytes(pdf_bytes)
+        text_parts = []
+        for img in images:
+            text_parts.append(pytesseract.image_to_string(img))
+        return "\n".join(text_parts)
+    except Exception as e:
+        print(f"[error] OCR extraction failed: {e}")
+        return ""
+
 @app.post("/hackrx/run", response_model=RunResponse)
 def hackrx_run(payload: RunRequest, Authorization: Optional[str] = Header(None)):
     _require_bearer(Authorization)
@@ -68,18 +93,40 @@ def hackrx_run(payload: RunRequest, Authorization: Optional[str] = Header(None))
     doc_id = _doc_id_from_url(doc_url)
 
     try:
-        # ✅ Check cache before reprocessing
         if doc_id not in _doc_cache:
+            # Step 1: Extract text
             policy_text = extract_text_from_url(doc_url)
-            if not policy_text:
-                raise HTTPException(status_code=500, detail="Failed to fetch/parse document text")
-            process_and_index_document(doc_id, doc_type="policy", text=policy_text, source=doc_url)
-            _doc_cache[doc_id] = True  # mark as processed
+            print(f"[debug] Extracted text length: {len(policy_text) if policy_text else 0}")
+
+            # Step 2: OCR fallback if empty
+            if not policy_text or len(policy_text.strip()) == 0:
+                print("[info] PDF extraction returned empty text! Attempting OCR...")
+                try:
+                    import requests
+                    pdf_bytes = requests.get(doc_url, timeout=30).content
+                    policy_text = _ocr_extract_from_pdf(pdf_bytes)
+                    print(f"[debug] OCR extracted text length: {len(policy_text)}")
+                except Exception as e:
+                    print(f"[error] Failed to download or OCR PDF: {e}")
+
+            if not policy_text or len(policy_text.strip()) == 0:
+                raise HTTPException(status_code=500, detail="Failed to fetch/parse document text (even with OCR)")
+
+            # Step 3: Index document
+            chunks = process_and_index_document(doc_id, doc_type="policy", text=policy_text, source=doc_url)
+            print(f"[debug] Processing {doc_id}, chunks before embedding: {len(chunks) if chunks else 0}")
+            if not chunks or all(len(c.strip()) == 0 for c in chunks):
+                print("[error] No valid chunks found to index.")
+
+            _doc_cache[doc_id] = True
 
         answers: List[str] = []
         for q in payload.questions:
             try:
                 result = reason_over_query(q, doc_id=doc_id, top_k=5)
+                if not result or (isinstance(result, dict) and not result.get("matches")):
+                    print(f"[warn] No matches found for: {q}")
+                    result = {"justification": "No relevant information found in document"}
             except Exception as e:
                 result = f"Error processing question: {str(e)}"
                 print(f"[error] reason_over_query failed: {traceback.format_exc()}")
