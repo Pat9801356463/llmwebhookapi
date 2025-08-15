@@ -27,7 +27,7 @@ _pc_index = _ensure_index()
 
 
 def _pad_or_check_embeddings(embeddings: np.ndarray) -> np.ndarray:
-    """Ensure embeddings have shape (_, EMBEDDING_DIM) by padding or truncating; returns float32."""
+    """Ensure embeddings have shape (_, EMBEDDING_DIM) by padding or truncating."""
     if embeddings is None or embeddings.size == 0:
         return np.zeros((0, Config.EMBEDDING_DIM), dtype=np.float32)
     if embeddings.ndim == 1:
@@ -43,39 +43,38 @@ def _pad_or_check_embeddings(embeddings: np.ndarray) -> np.ndarray:
     return embeddings[:, :target].astype(np.float32)
 
 
-def process_and_index_document(doc_id: str, doc_type: str, text: str, source: str = None) -> Tuple[List[str], np.ndarray]:
+def process_and_index_document(doc_id: str, doc_type: str, text: str, source: str = None) -> List[str]:
     """
     Chunk, embed, save to DB, and index in Pinecone.
-    Returns (chunks, embeddings).
+    Return just the chunks list (app does its own flattening).
     """
-    # 1) Load chunks/embeddings from DB if available; else generate
+    # 1) Load from DB if exists
     existing = fetch_chunks_from_db(doc_id)
     if existing:
-        chunks = [c["text"] for c in existing if c.get("text")]
+        chunks = [c["text"] for c in existing]
         emb_list = []
         for c in existing:
             arr = np.array(c.get("embedding") or [], dtype=np.float32)
-            if arr.size == 0:
-                # Ensure we have a vector; use zeros as placeholder
-                arr = np.zeros((Config.EMBEDDING_DIM,), dtype=np.float32)
-            emb_list.append(arr)
+            if arr.size > 0:
+                emb_list.append(arr)
+            else:
+                emb_list.append(np.zeros((Config.EMBEDDING_DIM,), dtype=np.float32))
         embeddings = np.vstack(emb_list) if emb_list else np.zeros((0, Config.EMBEDDING_DIM), dtype=np.float32)
     else:
+        # 2) Fresh chunking + embedding
         chunks = chunk_text(text, Config.CHUNK_SIZE, Config.OVERLAP_SIZE)
         if not chunks:
             print(f"[warn] No chunks produced for doc {doc_id}")
-            return [], np.zeros((0, Config.EMBEDDING_DIM), dtype=np.float32)
-
+            return []
         embeddings = embed_chunks(chunks)
         embeddings = _pad_or_check_embeddings(embeddings)
-
-        # Persist to DB (best-effort)
+        # 3) Persist to DB
         try:
             save_chunks_to_db(doc_id, doc_type, chunks, embeddings, source=source)
         except Exception as e:
             print(f"[warn] Failed to save chunks to DB for {doc_id}: {e}")
 
-    # 2) Upsert into Pinecone with proper metadata
+    # 4) Upsert into Pinecone (values from `embeddings`, metadata contains text)
     vectors = []
     for i in range(len(chunks)):
         vec = embeddings[i].tolist() if embeddings.shape[0] > i else [0.0] * Config.EMBEDDING_DIM
@@ -97,15 +96,14 @@ def process_and_index_document(doc_id: str, doc_type: str, text: str, source: st
     except Exception as e:
         print(f"[WARN] Pinecone upsert failed for doc {doc_id}: {e}")
 
-    return chunks, embeddings
+    return chunks
 
 
 def retrieve_top_chunks(query: str, doc_id: str, top_k: int = 3) -> List[str]:
     """
     Query Pinecone and return the top-k chunk texts.
-    We request include_values=True to enable optional local re-ranking.
-    If values are missing/empty, we safely fall back to Pinecone's scores.
-    If Pinecone returns no matches at all, we fall back to DB chunks as a last resort.
+    Requests include_values=True to allow local re-ranking.
+    Falls back to score-only order if values are absent/empty.
     """
     if not query or not doc_id:
         return []
@@ -122,91 +120,59 @@ def retrieve_top_chunks(query: str, doc_id: str, top_k: int = 3) -> List[str]:
     try:
         res = _pc_index.query(
             vector=q_vec.tolist(),
-            top_k=max(top_k * 2, 6),     # fetch more to allow local re-rank
+            top_k=max(top_k * 3, 9),     # widen candidate pool for better recall
             include_metadata=True,
-            include_values=True,          # critical: get values for rerank
+            include_values=True,          # IMPORTANT: request values back
             namespace=doc_id
         )
     except Exception as e:
         print(f"[WARN] Pinecone query failed: {e}")
-        res = None
-
-    # Robust match extraction
-    matches = []
-    if res is not None:
-        try:
-            matches = getattr(res, "matches", None)
-            if matches is None:
-                # Some client returns dict-like
-                matches = res.get("matches", [])  # type: ignore
-        except Exception:
-            matches = []
-
-    if not matches:
-        print(f"[info] No Pinecone matches for ns='{doc_id}' → attempting DB fallback.")
-        # ---- DB fallback: use top_k first chunks so LLM gets context ----
-        try:
-            rows = fetch_chunks_from_db(doc_id) or []
-            fallback_texts = [r["text"] for r in rows if r.get("text")]
-            if fallback_texts:
-                print(f"[info] DB fallback retrieved {len(fallback_texts)} texts; returning first {top_k}.")
-                return fallback_texts[:top_k]
-        except Exception as e:
-            print(f"[warn] DB fallback retrieval failed: {e}")
         return []
 
-    # Collect candidates: (text, values or None, score)
+    matches = getattr(res, "matches", None) or res.get("matches", [])
+    if not matches:
+        print(f"[info] No Pinecone matches for ns='{doc_id}'")
+        return []
+
+    # Collect candidates
     candidates = []
     for m in matches:
-        md = (m.get("metadata") or {}) if isinstance(m, dict) else getattr(m, "metadata", {}) or {}
-        txt = md.get("text")
+        md = m.get("metadata") or {}
+        txt = (md.get("text") or "").strip()
         if not txt:
             continue
-        # values can be a list or missing; handle both
-        raw_vals = (m.get("values") if isinstance(m, dict) else getattr(m, "values", None))
-        vals = None
-        if raw_vals is not None:
-            try:
-                vals = np.array(raw_vals, dtype=np.float32)
-            except Exception:
-                vals = None
-        score = (m.get("score", 0.0) if isinstance(m, dict) else getattr(m, "score", 0.0)) or 0.0
+        raw_vals = m.get("values")
+        vals = np.array(raw_vals, dtype=np.float32) if raw_vals is not None else None
+        score = float(m.get("score", 0.0))
         candidates.append((txt, vals, score))
 
     if not candidates:
-        print(f"[info] No candidates extracted from matches for ns='{doc_id}' → DB fallback.")
-        try:
-            rows = fetch_chunks_from_db(doc_id) or []
-            fallback_texts = [r["text"] for r in rows if r.get("text")]
-            if fallback_texts:
-                print(f"[info] DB fallback retrieved {len(fallback_texts)} texts; returning first {top_k}.")
-                return fallback_texts[:top_k]
-        except Exception as e:
-            print(f"[warn] DB fallback retrieval failed: {e}")
         return []
 
-    # Try local rerank if we actually have vectors; otherwise, use Pinecone's score
-    have_any_values = any((v is not None and np.size(v) > 0) for _, v, _ in candidates)
+    # Local rerank if any values present; otherwise use Pinecone score
+    def _cosine(a: np.ndarray, b_in):
+        b = _pad_or_check_embeddings(np.array(b_in, dtype=np.float32))
+        if b.size == 0:
+            return -1.0
+        b = b[0]
+        denom = (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8)
+        return float(np.dot(a, b) / denom)
 
-    if have_any_values:
-        # Local cosine re-rank (robust to size mismatch via padding)
-        def cosine(a, b):
-            b = _pad_or_check_embeddings(np.array(b, dtype=np.float32))
-            if b.size == 0:
-                return -1.0
-            b = b[0]
-            denom = (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8)
-            return float(np.dot(a, b) / denom)
+    have_values = any(v is not None and np.size(v) > 0 for _, v, _ in candidates)
 
-        ranked = sorted(
-            candidates,
-            key=lambda x: cosine(q_vec, x[1]),
-            reverse=True
-        )
-        top = [text for (text, _, __) in ranked[:top_k]]
-        return top
+    if have_values:
+        ranked = sorted(candidates, key=lambda x: _cosine(q_vec, x[1]), reverse=True)
+    else:
+        ranked = sorted(candidates, key=lambda x: x[2], reverse=True)
 
-    # Fallback: Use Pinecone scores directly (no values returned)
-    ranked_by_score = sorted(candidates, key=lambda x: x[2], reverse=True)
-    top_by_score = [text for (text, _, __) in ranked_by_score[:top_k]]
-    return top_by_score
+    # Deduplicate by text, keep order
+    seen = set()
+    ordered_texts = []
+    for txt, _, _ in ranked:
+        key = txt[:512]  # cheap hash key by prefix
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered_texts.append(txt)
+
+    return ordered_texts[:top_k]
