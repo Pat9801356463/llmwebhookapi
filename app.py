@@ -1,4 +1,3 @@
-# app.py
 import hashlib
 import json
 from typing import List, Optional
@@ -12,6 +11,9 @@ from engine.pinecone_handler import process_and_index_document
 from engine.reasoner import reason_over_query
 from engine.formatter import format_decision_response, format_pretty_print
 from engine.embedding_handler import embed_chunks  # force load model at startup
+
+# ✅ Cache to avoid reprocessing the same document repeatedly
+_doc_cache = {}
 
 # Pre-load embedder at startup (avoids first request delay)
 _ = embed_chunks(["warmup model load"])
@@ -40,35 +42,47 @@ def _require_bearer(auth_header: Optional[str]):
     if not Config.API_KEY or token != Config.API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-def _to_plain_answer(result: dict) -> str:
+def _to_plain_answer(result) -> str:
+    """Ensure we always return a clean string answer."""
     if isinstance(result, dict):
+        # Priority 1: justification
         if result.get("justification"):
             return str(result["justification"]).strip()
+
+        # Priority 2: formatted pretty print
         try:
             pp = format_pretty_print(format_decision_response(result))
             if pp and isinstance(pp, str):
                 return pp.strip()
         except Exception:
             pass
+
+        # Priority 3: JSON fallback
         try:
             return json.dumps(result, ensure_ascii=False)
         except Exception:
             return "No answer available"
-    return str(result)
+
+    # Non-dict result
+    return str(result).strip()
 
 @app.post("/hackrx/run", response_model=RunResponse)
 def hackrx_run(payload: RunRequest, Authorization: Optional[str] = Header(None)):
     _require_bearer(Authorization)
+
     if not payload.documents or not payload.questions:
         raise HTTPException(status_code=400, detail="Missing 'documents' or 'questions'")
 
     doc_url = payload.documents
     doc_id = _doc_id_from_url(doc_url)
-    policy_text = extract_text_from_url(doc_url)
-    if not policy_text:
-        raise HTTPException(status_code=500, detail="Failed to fetch/parse document text")
 
-    process_and_index_document(doc_id, doc_type="policy", text=policy_text, source=doc_url)
+    # ✅ Check cache before reprocessing
+    if doc_id not in _doc_cache:
+        policy_text = extract_text_from_url(doc_url)
+        if not policy_text:
+            raise HTTPException(status_code=500, detail="Failed to fetch/parse document text")
+        process_and_index_document(doc_id, doc_type="policy", text=policy_text, source=doc_url)
+        _doc_cache[doc_id] = True  # mark as processed
 
     answers: List[str] = []
     for q in payload.questions:
