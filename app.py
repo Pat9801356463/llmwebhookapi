@@ -1,9 +1,10 @@
 import hashlib
 import json
+import traceback
 from typing import List, Optional
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from config import Config
 from engine.db import log_user_query
 from engine.pdf_loader import extract_text_from_url
@@ -21,7 +22,7 @@ _ = embed_chunks(["warmup model load"])
 app = FastAPI(
     title="HackRx Policy LLM API",
     description="RAG-first policy QA with Pinecone + Postgres logging",
-    version="1.0.0",
+    version="1.0.1",
 )
 
 class RunRequest(BaseModel):
@@ -44,27 +45,17 @@ def _require_bearer(auth_header: Optional[str]):
 
 def _to_plain_answer(result) -> str:
     """Ensure we always return a clean string answer."""
-    if isinstance(result, dict):
-        # Priority 1: justification
-        if result.get("justification"):
-            return str(result["justification"]).strip()
-
-        # Priority 2: formatted pretty print
-        try:
+    try:
+        if isinstance(result, dict):
+            if result.get("justification"):
+                return str(result["justification"]).strip()
             pp = format_pretty_print(format_decision_response(result))
             if pp and isinstance(pp, str):
                 return pp.strip()
-        except Exception:
-            pass
-
-        # Priority 3: JSON fallback
-        try:
             return json.dumps(result, ensure_ascii=False)
-        except Exception:
-            return "No answer available"
-
-    # Non-dict result
-    return str(result).strip()
+        return str(result).strip()
+    except Exception:
+        return "No answer available"
 
 @app.post("/hackrx/run", response_model=RunResponse)
 def hackrx_run(payload: RunRequest, Authorization: Optional[str] = Header(None)):
@@ -76,24 +67,35 @@ def hackrx_run(payload: RunRequest, Authorization: Optional[str] = Header(None))
     doc_url = payload.documents
     doc_id = _doc_id_from_url(doc_url)
 
-    # ✅ Check cache before reprocessing
-    if doc_id not in _doc_cache:
-        policy_text = extract_text_from_url(doc_url)
-        if not policy_text:
-            raise HTTPException(status_code=500, detail="Failed to fetch/parse document text")
-        process_and_index_document(doc_id, doc_type="policy", text=policy_text, source=doc_url)
-        _doc_cache[doc_id] = True  # mark as processed
+    try:
+        # ✅ Check cache before reprocessing
+        if doc_id not in _doc_cache:
+            policy_text = extract_text_from_url(doc_url)
+            if not policy_text:
+                raise HTTPException(status_code=500, detail="Failed to fetch/parse document text")
+            process_and_index_document(doc_id, doc_type="policy", text=policy_text, source=doc_url)
+            _doc_cache[doc_id] = True  # mark as processed
 
-    answers: List[str] = []
-    for q in payload.questions:
-        result = reason_over_query(q, doc_id=doc_id, top_k=5)
-        try:
-            log_user_query(payload.session_id or "anonymous", q)
-        except Exception as e:
-            print(f"[warn] failed to log query: {e}")
-        answers.append(_to_plain_answer(result))
+        answers: List[str] = []
+        for q in payload.questions:
+            try:
+                result = reason_over_query(q, doc_id=doc_id, top_k=5)
+            except Exception as e:
+                result = f"Error processing question: {str(e)}"
+                print(f"[error] reason_over_query failed: {traceback.format_exc()}")
+            try:
+                log_user_query(payload.session_id or "anonymous", q)
+            except Exception as e:
+                print(f"[warn] failed to log query: {e}")
+            answers.append(_to_plain_answer(result))
 
-    return RunResponse(answers=answers)
+        return RunResponse(answers=answers)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[fatal] Internal server error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
 @app.get("/health")
 def health():
