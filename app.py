@@ -134,17 +134,67 @@ def health():
 def details():
     return {"status": "ok", "info": "Details endpoint reachable"}
 
-@app.get("/hackrx/run")
-def hackrx_run_info():
-    return {
-        "status": "ok",
-        "message": "HackRx Policy LLM runner. Use POST with Bearer token.",
-        "expected_payload": {
-            "documents": "https://example.com/file.pdf",
-            "questions": ["Question 1", "Question 2"],
-            "session_id": "optional-session-id",
-        },
-    }
+@app.post("/hackrx/run", response_model=RunResponse)
+def hackrx_run(
+    payload: RunRequest,
+    Authorization: Optional[str] = Header(None),
+    force_reload: Optional[bool] = False
+):
+    _require_bearer(Authorization)
+
+    if not payload.documents or not payload.questions:
+        raise HTTPException(status_code=400, detail="Missing 'documents' or 'questions'")
+
+    doc_url = payload.documents
+    doc_id = _doc_id_from_url(doc_url)
+
+    # ✅ Clear cache if force_reload is requested
+    if force_reload:
+        print(f"[info] force_reload=True → Clearing cache for doc {doc_id}")
+        _doc_cache.pop(doc_id, None)
+
+    try:
+        if doc_id not in _doc_cache:
+            policy_text = extract_text_from_url(doc_url)
+            if not policy_text.strip():
+                print("[info] Empty text from PDF — trying OCR fallback.")
+                try:
+                    import requests
+                    pdf_bytes = requests.get(doc_url, timeout=30).content
+                    policy_text = _ocr_extract_from_pdf(pdf_bytes)
+                except Exception as e:
+                    print(f"[error] OCR download failed: {e}")
+
+            if not policy_text.strip():
+                raise HTTPException(status_code=500, detail="Failed to extract text from document.")
+
+            chunks = process_and_index_document(doc_id, "policy", policy_text, doc_url)
+            if not chunks or all(not c.strip() for c in chunks):
+                print("[warn] No chunks to index.")
+            _doc_cache[doc_id] = True
+
+        answers: List[str] = []
+        for q in payload.questions:
+            try:
+                result = reason_over_query(q, doc_id=doc_id, top_k=5)
+                if not result or (isinstance(result, dict) and not result.get("matches")):
+                    result = {"justification": "No relevant information found in document"}
+            except Exception:
+                result = {"justification": "Error processing question"}
+                print(f"[error] reason_over_query failed:\n{traceback.format_exc()}")
+            try:
+                log_user_query(payload.session_id or "anonymous", q)
+            except Exception as e:
+                print(f"[warn] Failed to log query: {e}")
+            answers.append(_to_plain_answer(result))
+
+        return RunResponse(answers=answers)
+
+    except HTTPException:
+        raise
+    except Exception:
+        print(f"[fatal] Internal server error:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @app.get("/")
 def root():
