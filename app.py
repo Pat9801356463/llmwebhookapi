@@ -87,9 +87,14 @@ def hackrx_run(
     doc_url = payload.documents
     doc_id = _doc_id_from_url(doc_url)
 
-    # ✅ Clear cache if force_reload is requested
+    # ✅ Always allow forced cache clearing
     if force_reload:
         print(f"[info] force_reload=True → Clearing cache for doc {doc_id}")
+        _doc_cache.pop(doc_id, None)
+
+    # ✅ Extra safety — clear cache if it exists but doc was never actually embedded
+    if doc_id in _doc_cache and not _doc_cache[doc_id]:
+        print(f"[warn] Cached doc {doc_id} has no embeddings → clearing")
         _doc_cache.pop(doc_id, None)
 
     try:
@@ -123,7 +128,7 @@ def hackrx_run(
                 print("[warn] No chunks to index.")
                 raise HTTPException(status_code=422, detail="No valid chunks extracted.")
 
-            _doc_cache[doc_id] = True
+            _doc_cache[doc_id] = True  # mark as processed
 
         answers: List[str] = []
         for q in payload.questions:
