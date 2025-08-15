@@ -4,7 +4,6 @@ import traceback
 from typing import List, Optional
 
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from config import Config
@@ -15,7 +14,6 @@ from engine.reasoner import reason_over_query
 from engine.formatter import format_decision_response, format_pretty_print
 from engine.embedding_handler import embed_chunks  # force load model at startup
 
-# OCR fallback imports
 try:
     import pytesseract
     from pdf2image import convert_from_bytes
@@ -23,12 +21,12 @@ except ImportError:
     pytesseract = None
 
 _doc_cache = {}
-_ = embed_chunks(["warmup model load"])  # warmup embedder
+_ = embed_chunks(["warmup model load"])  # warmup
 
 app = FastAPI(
     title="HackRx Policy LLM API",
     description="RAG-first policy QA with Pinecone + Postgres logging",
-    version="1.1.1",
+    version="1.1.2",
 )
 
 class RunRequest(BaseModel):
@@ -87,48 +85,47 @@ def hackrx_run(
     doc_url = payload.documents
     doc_id = _doc_id_from_url(doc_url)
 
-    # ✅ Always allow forced cache clearing
-    if force_reload:
-        print(f"[info] force_reload=True → Clearing cache for doc {doc_id}")
-        _doc_cache.pop(doc_id, None)
+    # Always clear _doc_cache for safety
+    global _doc_cache
+    _doc_cache.clear()
+    print(f"[debug] Cleared _doc_cache at start of run. Processing doc: {doc_id}")
 
-    # ✅ Extra safety — clear cache if it exists but doc was never actually embedded
-    if doc_id in _doc_cache and not _doc_cache[doc_id]:
-        print(f"[warn] Cached doc {doc_id} has no embeddings → clearing")
-        _doc_cache.pop(doc_id, None)
+    if force_reload:
+        print(f"[info] force_reload=True for doc {doc_id}")
 
     try:
-        if doc_id not in _doc_cache:
-            policy_text = extract_text_from_url(doc_url)
-            if not policy_text.strip():
-                print("[info] Empty text from PDF — trying OCR fallback.")
-                try:
-                    import requests
-                    pdf_bytes = requests.get(doc_url, timeout=30).content
-                    policy_text = _ocr_extract_from_pdf(pdf_bytes)
-                except Exception as e:
-                    print(f"[error] OCR download failed: {e}")
+        policy_text = extract_text_from_url(doc_url)
+        if not policy_text.strip():
+            print("[info] Empty text from PDF — trying OCR fallback.")
+            try:
+                import requests
+                pdf_bytes = requests.get(doc_url, timeout=30).content
+                policy_text = _ocr_extract_from_pdf(pdf_bytes)
+            except Exception as e:
+                print(f"[error] OCR download failed: {e}")
 
-            if not policy_text.strip():
-                raise HTTPException(status_code=422, detail="No text extracted from document.")
+        if not policy_text.strip():
+            raise HTTPException(status_code=422, detail="No text extracted from document.")
 
-            chunks = process_and_index_document(doc_id, "policy", policy_text, doc_url)
+        chunks = process_and_index_document(doc_id, "policy", policy_text, doc_url)
 
-            # ✅ Flatten chunks and ensure strings
-            if chunks:
-                flat_chunks = []
-                for c in chunks:
-                    if isinstance(c, list):
-                        flat_chunks.extend(str(x) for x in c if str(x).strip())
-                    else:
-                        flat_chunks.append(str(c))
-                chunks = flat_chunks
+        # Flatten & filter
+        flat_chunks = []
+        for c in chunks:
+            if isinstance(c, list):
+                flat_chunks.extend([str(x) for x in c if str(x).strip()])
+            elif isinstance(c, str) and c.strip():
+                flat_chunks.append(c)
+        chunks = flat_chunks
 
-            if not chunks or all(not c.strip() for c in chunks):
-                print("[warn] No chunks to index.")
-                raise HTTPException(status_code=422, detail="No valid chunks extracted.")
+        if not chunks:
+            print("[warn] No non-empty chunks to index.")
+            raise HTTPException(status_code=422, detail="No valid chunks extracted.")
 
-            _doc_cache[doc_id] = True  # mark as processed
+        print(f"[debug] Final chunk count: {len(chunks)}")
+        print(f"[debug] Sample chunk: {chunks[0][:120]}...")
+
+        _doc_cache[doc_id] = True
 
         answers: List[str] = []
         for q in payload.questions:
