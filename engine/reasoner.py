@@ -1,3 +1,4 @@
+# engine/reasoner.py
 import json
 from config import Config
 from engine.query_parser import parse_query
@@ -87,7 +88,8 @@ def run_llm_reasoning(parsed: dict, matched_clauses: list) -> dict:
 
 def reason_over_query(raw_query: str, doc_id: str, top_k: int = 5) -> dict:
     """
-    Full reasoning pipeline.
+    Full reasoning pipeline: parse -> retrieve -> reason.
+    Defensively handles empty/no retrieval by returning a clear justification.
     """
     parsed = parse_query(raw_query)
 
