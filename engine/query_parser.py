@@ -3,12 +3,16 @@ import re
 from typing import Dict, Optional
 
 # Regex patterns for key fields
-AGE_PATTERN = re.compile(r"(\d{1,3})\s*[-]?\s*(year\s*old|yo|yr|y/o|M|F)?", re.IGNORECASE)
+AGE_PATTERN = re.compile(
+    r"(\d{1,3})\s*[-]?\s*(year\s*old|yo|yr|y/o|M|F|male|female)?",
+    re.IGNORECASE
+)
 PROCEDURE_PATTERN = re.compile(
     r"(surgery|treatment|operation|therapy|scan|transplant|procedure|hospitalization)",
     re.IGNORECASE,
 )
-LOCATION_PATTERN = re.compile(r"in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)", re.IGNORECASE)
+# Allow lowercase city names too
+LOCATION_PATTERN = re.compile(r"in\s+([A-Za-z]+(?:\s+[A-Za-z]+)*)", re.IGNORECASE)
 DURATION_PATTERN = re.compile(r"(\d+)\s*[-]?\s*(month|year|day)s?", re.IGNORECASE)
 
 
@@ -19,7 +23,7 @@ def safe_upper(s: Optional[str]) -> Optional[str]:
 
 def parse_query(query: str) -> Dict[str, Optional[str]]:
     """
-    Extracts structured details from a natural-language insurance query.
+    Extract structured details from a natural-language insurance query.
     Detects: age, gender, procedure, location, and policy duration.
     """
     result = {
@@ -33,14 +37,17 @@ def parse_query(query: str) -> Dict[str, Optional[str]]:
     # --- Age & Gender ---
     age_match = AGE_PATTERN.search(query)
     if age_match:
-        result["age"] = int(age_match.group(1))
+        try:
+            result["age"] = int(age_match.group(1))
+        except ValueError:
+            result["age"] = None
         gender_candidate = age_match.group(2)
         if gender_candidate:
-            gender_candidate = gender_candidate.strip().upper()
-            if gender_candidate in {"M", "F"}:
-                result["gender"] = gender_candidate
-            else:
-                result["gender"] = None
+            gender_candidate = gender_candidate.strip().lower()
+            if gender_candidate in {"m", "male"}:
+                result["gender"] = "M"
+            elif gender_candidate in {"f", "female"}:
+                result["gender"] = "F"
 
     # --- Procedure ---
     procedure_match = PROCEDURE_PATTERN.search(query)
@@ -50,7 +57,8 @@ def parse_query(query: str) -> Dict[str, Optional[str]]:
     # --- Location ---
     location_match = LOCATION_PATTERN.search(query)
     if location_match:
-        result["location"] = location_match.group(1)
+        # Normalize to title case for consistent matching downstream
+        result["location"] = location_match.group(1).title()
 
     # --- Policy Duration ---
     duration_match = DURATION_PATTERN.search(query)
@@ -65,8 +73,9 @@ def parse_query(query: str) -> Dict[str, Optional[str]]:
 if __name__ == "__main__":
     samples = [
         "46M, knee surgery in Pune, 3-month policy",
-        "female 30 yo, MRI scan in New Delhi for 1 year",
-        "65 year old male requires hospitalization in Mumbai for 2 years",
+        "female 30 yo, MRI scan in new delhi for 1 year",
+        "65 year old male requires hospitalization in mumbai for 2 years",
+        "operation for 50F in chennai 6 months",
     ]
     for s in samples:
         print(f"Query: {s}")
