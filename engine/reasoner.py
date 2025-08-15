@@ -3,7 +3,6 @@ from config import Config
 from engine.query_parser import parse_query
 from engine.pinecone_handler import retrieve_top_chunks  # Pinecone-backed retrieval
 
-
 # === Dynamically select LLM client ===
 if getattr(Config, "LLM_MODE", "gemini").lower() == "gemini":
     from engine.gemini_runner import GeminiLLM
@@ -26,7 +25,7 @@ def build_prompt(parsed: dict, matched_clauses: list) -> str:
         {
             "doc_type": c.get("doc_type", ""),
             "source": c.get("source", ""),
-            "text_snippet": c.get("text", "")[:1000],  # avoid token overflow
+            "text_snippet": c.get("text", "")[:1000],
         }
         for c in matched_clauses
     ]
@@ -69,11 +68,9 @@ def run_llm_reasoning(parsed: dict, matched_clauses: list) -> dict:
         json_block = raw_output[start:end]
         result = json.loads(json_block)
 
-        # Normalize to also expose 'amount' for downstream formatters/loggers
         if "payout_amount" in result and "amount" not in result:
             result["amount"] = result["payout_amount"]
 
-        # Attach parsed & matched for completeness if model omitted them
         result.setdefault("query_details", parsed)
         result.setdefault("matched_clauses", matched_clauses)
         return result
@@ -90,28 +87,37 @@ def run_llm_reasoning(parsed: dict, matched_clauses: list) -> dict:
 
 def reason_over_query(raw_query: str, doc_id: str, top_k: int = 5) -> dict:
     """
-    Full reasoning pipeline:
-    1. Parse query into structured fields.
-    2. Retrieve relevant clauses from Pinecone (namespace = doc_id).
-    3. Run LLM reasoning.
+    Full reasoning pipeline.
     """
     parsed = parse_query(raw_query)
 
-    matched_texts = retrieve_top_chunks(raw_query, doc_id, top_k=top_k)
-    matched_clauses = [{"text": t, "source": doc_id, "doc_type": "policy"} for t in matched_texts]
+    matched_texts = retrieve_top_chunks(raw_query, doc_id, top_k=top_k) or []
+    if not matched_texts:
+        return {
+            "decision": "unknown",
+            "payout_amount": None,
+            "amount": None,
+            "justification": "No relevant clauses found or retrieval failed.",
+            "matched_clauses": [],
+            "query_details": parsed,
+        }
+
+    matched_clauses = [
+        {"text": t, "source": doc_id, "doc_type": "policy"}
+        for t in matched_texts if t
+    ]
 
     if not matched_clauses:
         return {
             "decision": "unknown",
             "payout_amount": None,
             "amount": None,
-            "justification": "No relevant clauses found.",
+            "justification": "No valid clause text retrieved.",
             "matched_clauses": [],
             "query_details": parsed,
         }
 
-    result = run_llm_reasoning(parsed, matched_clauses)
-    return result
+    return run_llm_reasoning(parsed, matched_clauses)
 
 
 # Alias
