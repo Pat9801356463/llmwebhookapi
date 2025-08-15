@@ -28,7 +28,7 @@ _ = embed_chunks(["warmup model load"])  # warmup embedder
 app = FastAPI(
     title="HackRx Policy LLM API",
     description="RAG-first policy QA with Pinecone + Postgres logging",
-    version="1.1.0",
+    version="1.1.1",
 )
 
 class RunRequest(BaseModel):
@@ -74,7 +74,11 @@ def _ocr_extract_from_pdf(pdf_bytes: bytes) -> str:
         return ""
 
 @app.post("/hackrx/run", response_model=RunResponse)
-def hackrx_run(payload: RunRequest, Authorization: Optional[str] = Header(None)):
+def hackrx_run(
+    payload: RunRequest,
+    Authorization: Optional[str] = Header(None),
+    force_reload: Optional[bool] = False
+):
     _require_bearer(Authorization)
 
     if not payload.documents or not payload.questions:
@@ -82,6 +86,11 @@ def hackrx_run(payload: RunRequest, Authorization: Optional[str] = Header(None))
 
     doc_url = payload.documents
     doc_id = _doc_id_from_url(doc_url)
+
+    # ✅ Clear cache if force_reload is requested
+    if force_reload:
+        print(f"[info] force_reload=True → Clearing cache for doc {doc_id}")
+        _doc_cache.pop(doc_id, None)
 
     try:
         if doc_id not in _doc_cache:
@@ -96,11 +105,24 @@ def hackrx_run(payload: RunRequest, Authorization: Optional[str] = Header(None))
                     print(f"[error] OCR download failed: {e}")
 
             if not policy_text.strip():
-                raise HTTPException(status_code=500, detail="Failed to extract text from document.")
+                raise HTTPException(status_code=422, detail="No text extracted from document.")
 
             chunks = process_and_index_document(doc_id, "policy", policy_text, doc_url)
+
+            # ✅ Flatten chunks and ensure strings
+            if chunks:
+                flat_chunks = []
+                for c in chunks:
+                    if isinstance(c, list):
+                        flat_chunks.extend(str(x) for x in c if str(x).strip())
+                    else:
+                        flat_chunks.append(str(c))
+                chunks = flat_chunks
+
             if not chunks or all(not c.strip() for c in chunks):
                 print("[warn] No chunks to index.")
+                raise HTTPException(status_code=422, detail="No valid chunks extracted.")
+
             _doc_cache[doc_id] = True
 
         answers: List[str] = []
@@ -134,71 +156,9 @@ def health():
 def details():
     return {"status": "ok", "info": "Details endpoint reachable"}
 
-@app.post("/hackrx/run", response_model=RunResponse)
-def hackrx_run(
-    payload: RunRequest,
-    Authorization: Optional[str] = Header(None),
-    force_reload: Optional[bool] = False
-):
-    _require_bearer(Authorization)
-
-    if not payload.documents or not payload.questions:
-        raise HTTPException(status_code=400, detail="Missing 'documents' or 'questions'")
-
-    doc_url = payload.documents
-    doc_id = _doc_id_from_url(doc_url)
-
-    # ✅ Clear cache if force_reload is requested
-    if force_reload:
-        print(f"[info] force_reload=True → Clearing cache for doc {doc_id}")
-        _doc_cache.pop(doc_id, None)
-
-    try:
-        if doc_id not in _doc_cache:
-            policy_text = extract_text_from_url(doc_url)
-            if not policy_text.strip():
-                print("[info] Empty text from PDF — trying OCR fallback.")
-                try:
-                    import requests
-                    pdf_bytes = requests.get(doc_url, timeout=30).content
-                    policy_text = _ocr_extract_from_pdf(pdf_bytes)
-                except Exception as e:
-                    print(f"[error] OCR download failed: {e}")
-
-            if not policy_text.strip():
-                raise HTTPException(status_code=500, detail="Failed to extract text from document.")
-
-            chunks = process_and_index_document(doc_id, "policy", policy_text, doc_url)
-            if not chunks or all(not c.strip() for c in chunks):
-                print("[warn] No chunks to index.")
-            _doc_cache[doc_id] = True
-
-        answers: List[str] = []
-        for q in payload.questions:
-            try:
-                result = reason_over_query(q, doc_id=doc_id, top_k=5)
-                if not result or (isinstance(result, dict) and not result.get("matches")):
-                    result = {"justification": "No relevant information found in document"}
-            except Exception:
-                result = {"justification": "Error processing question"}
-                print(f"[error] reason_over_query failed:\n{traceback.format_exc()}")
-            try:
-                log_user_query(payload.session_id or "anonymous", q)
-            except Exception as e:
-                print(f"[warn] Failed to log query: {e}")
-            answers.append(_to_plain_answer(result))
-
-        return RunResponse(answers=answers)
-
-    except HTTPException:
-        raise
-    except Exception:
-        print(f"[fatal] Internal server error:\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
 @app.get("/")
 def root():
     return {
         "message": "HackRx Policy LLM API is running",
-        "endpoints": ["/hackrx/run (GET|POST)", "/health", "/details"],
+        "endpoints": ["/hackrx/run (POST)", "/health", "/details"],
     }
