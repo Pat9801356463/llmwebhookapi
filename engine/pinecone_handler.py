@@ -7,7 +7,9 @@ from engine.db import save_chunks_to_db, fetch_chunks_from_db
 from engine.embedding_handler import chunk_text, embed_chunks
 from functools import lru_cache
 
+# Pinecone client
 _pc_client = Pinecone(api_key=Config.PINECONE_API_KEY)
+
 
 def _ensure_index():
     indexes = {i["name"]: i for i in _pc_client.list_indexes()}
@@ -21,7 +23,9 @@ def _ensure_index():
         )
     return _pc_client.Index(Config.PINECONE_INDEX_NAME)
 
+
 _pc_index = _ensure_index()
+
 
 def namespace_exists(doc_id: str) -> bool:
     """Check if namespace (doc) already has vectors in Pinecone."""
@@ -32,7 +36,9 @@ def namespace_exists(doc_id: str) -> bool:
         print(f"[warn] namespace_exists check failed: {e}")
         return False
 
+
 def _pad_or_check_embeddings(embeddings: np.ndarray) -> np.ndarray:
+    """Ensure embeddings match Pinecone dimension (pad or trim if needed)."""
     if embeddings is None or embeddings.size == 0:
         return np.zeros((0, Config.EMBEDDING_DIM), dtype=np.float32)
     if embeddings.ndim == 1:
@@ -46,9 +52,19 @@ def _pad_or_check_embeddings(embeddings: np.ndarray) -> np.ndarray:
         return np.hstack((embeddings.astype(np.float32), pad))
     return embeddings[:, :target].astype(np.float32)
 
-def process_and_index_document(doc_id: str, doc_type: str, text: str, source: str = None) -> List[str]:
+
+def process_and_index_document(doc_id: str, doc_type: str, text: str, source: str = None, force_reindex: bool = False) -> List[str]:
+    """
+    Process a document into chunks, embed, and index in Pinecone.
+    Skips re-upsert if chunks already exist unless force_reindex=True.
+    """
     existing = fetch_chunks_from_db(doc_id)
-    if existing:
+
+    if existing and not force_reindex:
+        print(f"[info] Skipping re-index: chunks already exist in DB for {doc_id}")
+        return [c["text"] for c in existing]
+
+    if existing and force_reindex:
         chunks = [c["text"] for c in existing]
         embeddings = np.vstack([
             np.array(c.get("embedding") or np.zeros(Config.EMBEDDING_DIM), dtype=np.float32)
@@ -65,6 +81,7 @@ def process_and_index_document(doc_id: str, doc_type: str, text: str, source: st
         except Exception as e:
             print(f"[warn] Failed to save chunks to DB for {doc_id}: {e}")
 
+    # Prepare vectors for Pinecone
     vectors = [{
         "id": f"{doc_id}-{i}",
         "values": embeddings[i].tolist(),
@@ -85,8 +102,10 @@ def process_and_index_document(doc_id: str, doc_type: str, text: str, source: st
 
     return chunks
 
+
 @lru_cache(maxsize=512)
 def retrieve_top_chunks(query: str, doc_id: str, top_k: int = 3) -> List[str]:
+    """Retrieve top-k most relevant chunks for query within given namespace."""
     if not query or not doc_id:
         return []
     q_vec = _pad_or_check_embeddings(embed_chunks([query]))
@@ -94,10 +113,11 @@ def retrieve_top_chunks(query: str, doc_id: str, top_k: int = 3) -> List[str]:
         print(f"[warn] Query embedding is empty for query='{query}'")
         return []
     q_vec = q_vec[0]
+
     try:
         res = _pc_index.query(
             vector=q_vec.tolist(),
-            top_k=max(top_k * 2, 6),
+            top_k=top_k,  # strict top_k (no doubling)
             include_metadata=True,
             include_values=True,
             namespace=doc_id
@@ -105,9 +125,11 @@ def retrieve_top_chunks(query: str, doc_id: str, top_k: int = 3) -> List[str]:
     except Exception as e:
         print(f"[WARN] Pinecone query failed: {e}")
         return []
+
     matches = getattr(res, "matches", None) or res.get("matches", [])
     if not matches:
         return []
+
     candidates = []
     for m in matches:
         md = m.get("metadata") or {}
@@ -118,8 +140,11 @@ def retrieve_top_chunks(query: str, doc_id: str, top_k: int = 3) -> List[str]:
         vals = np.array(raw_vals, dtype=np.float32) if raw_vals else None
         score = float(m.get("score", 0.0))
         candidates.append((txt, vals, score))
+
     if not candidates:
         return []
+
+    # Re-rank locally if vector values exist
     have_values = any(v is not None and v.size > 0 for _, v, _ in candidates)
     if have_values:
         def _cosine(a: np.ndarray, b_in):
@@ -129,10 +154,13 @@ def retrieve_top_chunks(query: str, doc_id: str, top_k: int = 3) -> List[str]:
         candidates.sort(key=lambda x: _cosine(q_vec, x[1]), reverse=True)
     else:
         candidates.sort(key=lambda x: x[2], reverse=True)
+
+    # Deduplicate while preserving order
     seen, ordered = set(), []
     for txt, _, _ in candidates:
         key = txt[:512]
         if key not in seen:
             seen.add(key)
             ordered.append(txt)
+
     return ordered[:top_k]
