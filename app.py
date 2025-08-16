@@ -13,7 +13,7 @@ from engine.pdf_loader import extract_text_from_url
 from engine.pinecone_handler import process_and_index_document, namespace_exists
 from engine.reasoner import reason_over_query
 from engine.formatter import format_decision_response, format_pretty_print
-from engine.embedding_handler import embed_chunks  # force load model at startup
+from engine.embedding_handler import embed_chunks  # warmup embedding model
 
 # OCR fallback imports
 try:
@@ -22,13 +22,13 @@ try:
 except ImportError:
     pytesseract = None
 
-_doc_cache = {}
-_ = embed_chunks(["warmup model load"])  # warmup
+# Warm up model
+_ = embed_chunks(["warmup model load"])
 
 app = FastAPI(
     title="HackRx Policy LLM API",
     description="RAG-first policy QA with Pinecone + Postgres logging",
-    version="1.2.1",  # bumped version
+    version="1.2.2",
 )
 
 class RunRequest(BaseModel):
@@ -92,12 +92,6 @@ def hackrx_run(
     doc_url = payload.documents
     doc_id = _doc_id_from_url(doc_url)
 
-    # No more unconditional cache clearing — keeps in-proc skip working
-    global _doc_cache
-
-    if force_reload:
-        print(f"[info] force_reload=True for doc {doc_id}")
-
     try:
         # 1) Extract text
         policy_text = extract_text_from_url(doc_url)
@@ -113,33 +107,19 @@ def hackrx_run(
         if not policy_text.strip():
             raise HTTPException(status_code=422, detail="No text extracted from document.")
 
+        # 2) Embed only if not already in Pinecone or if force_reload
         chunks = []
-        # 2) Only embed/index if not already present or force_reload
         if force_reload or not namespace_exists(doc_id):
             print(f"[info] Processing and indexing doc {doc_id}...")
             chunks = process_and_index_document(doc_id, "policy", policy_text, doc_url)
         else:
             print(f"[info] Doc {doc_id} already exists in Pinecone — skipping embedding.")
 
-        # Flatten chunks only if we processed them
-        if chunks:
-            flat_chunks = []
-            for c in chunks:
-                if isinstance(c, list):
-                    flat_chunks.extend([str(x) for x in c if str(x).strip()])
-                elif isinstance(c, str) and c.strip():
-                    flat_chunks.append(c)
-            chunks = flat_chunks
-            if not chunks:
-                print("[warn] No non-empty chunks to index.")
-                raise HTTPException(status_code=422, detail="No valid chunks extracted.")
-            _doc_cache[doc_id] = True
-
         # 3) Answer questions
         answers: List[str] = []
         for q in payload.questions:
             try:
-                result = reason_over_query(q, doc_id=doc_id, top_k=5)  # reduced top_k for speed
+                result = reason_over_query(q, doc_id=doc_id, top_k=3)  # 🔹 reduced top_k
                 if not result or (isinstance(result, dict) and not result.get("matched_clauses")):
                     result = {
                         "justification": "No explicit exclusion matched. If the waiting period is already met, approve unless another exclusion applies."
