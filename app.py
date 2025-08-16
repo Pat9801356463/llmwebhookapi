@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from config import Config
 from engine.db import log_user_query
 from engine.pdf_loader import extract_text_from_url
-from engine.pinecone_handler import process_and_index_document
+from engine.pinecone_handler import process_and_index_document, namespace_exists
 from engine.reasoner import reason_over_query
 from engine.formatter import format_decision_response, format_pretty_print
 from engine.embedding_handler import embed_chunks  # force load model at startup
@@ -22,14 +22,13 @@ try:
 except ImportError:
     pytesseract = None
 
-# simple in-proc doc cache just to avoid double ingestion within a single process lifetime
 _doc_cache = {}
 _ = embed_chunks(["warmup model load"])  # warmup
 
 app = FastAPI(
     title="HackRx Policy LLM API",
     description="RAG-first policy QA with Pinecone + Postgres logging",
-    version="1.2.0",
+    version="1.2.1",  # bumped version
 )
 
 class RunRequest(BaseModel):
@@ -51,16 +50,11 @@ def _require_bearer(auth_header: Optional[str]):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 def _to_plain_answer(result) -> str:
-    """
-    Normalize engine result to a simple, human-readable string for HackRx harness.
-    Prefer 'justification'. Fallback to formatted pretty print, then JSON string.
-    """
     try:
         if isinstance(result, dict):
             just = (result.get("justification") or "").strip()
             if just:
                 return just
-            # try standard formatters you already have
             try:
                 pp = format_pretty_print(format_decision_response(result))
                 if isinstance(pp, str) and pp.strip():
@@ -68,7 +62,6 @@ def _to_plain_answer(result) -> str:
             except Exception:
                 pass
             return json.dumps(result, ensure_ascii=False)
-        # not dict => stringify
         s = str(result or "").strip()
         return s if s else "No answer available"
     except Exception:
@@ -99,17 +92,14 @@ def hackrx_run(
     doc_url = payload.documents
     doc_id = _doc_id_from_url(doc_url)
 
-    # For the HackRx harness we want to avoid “stale” namespace state.
-    # Clear the tiny in-proc cache each call to ensure fresh embedding/upsert.
+    # No more unconditional cache clearing — keeps in-proc skip working
     global _doc_cache
-    _doc_cache.clear()
-    print(f"[debug] Cleared _doc_cache at start of run. Processing doc: {doc_id}")
 
     if force_reload:
         print(f"[info] force_reload=True for doc {doc_id}")
 
     try:
-        # --- 1) Extract text (with OCR fallback)
+        # 1) Extract text
         policy_text = extract_text_from_url(doc_url)
         if not policy_text.strip():
             print("[info] Empty text from PDF — trying OCR fallback.")
@@ -123,43 +113,42 @@ def hackrx_run(
         if not policy_text.strip():
             raise HTTPException(status_code=422, detail="No text extracted from document.")
 
-        # --- 2) Chunk + embed + upsert into Pinecone (and DB)
-        chunks = process_and_index_document(doc_id, "policy", policy_text, doc_url)
+        chunks = []
+        # 2) Only embed/index if not already present or force_reload
+        if force_reload or not namespace_exists(doc_id):
+            print(f"[info] Processing and indexing doc {doc_id}...")
+            chunks = process_and_index_document(doc_id, "policy", policy_text, doc_url)
+        else:
+            print(f"[info] Doc {doc_id} already exists in Pinecone — skipping embedding.")
 
-        # Flatten & filter to strings
-        flat_chunks = []
-        for c in chunks:
-            if isinstance(c, list):
-                flat_chunks.extend([str(x) for x in c if str(x).strip()])
-            elif isinstance(c, str) and c.strip():
-                flat_chunks.append(c)
-        chunks = flat_chunks
+        # Flatten chunks only if we processed them
+        if chunks:
+            flat_chunks = []
+            for c in chunks:
+                if isinstance(c, list):
+                    flat_chunks.extend([str(x) for x in c if str(x).strip()])
+                elif isinstance(c, str) and c.strip():
+                    flat_chunks.append(c)
+            chunks = flat_chunks
+            if not chunks:
+                print("[warn] No non-empty chunks to index.")
+                raise HTTPException(status_code=422, detail="No valid chunks extracted.")
+            _doc_cache[doc_id] = True
 
-        if not chunks:
-            print("[warn] No non-empty chunks to index.")
-            raise HTTPException(status_code=422, detail="No valid chunks extracted.")
-
-        print(f"[debug] Final chunk count: {len(chunks)}")
-        print(f"[debug] Sample chunk: {chunks[0][:120]}...")
-
-        _doc_cache[doc_id] = True
-
-        # --- 3) Answer questions
+        # 3) Answer questions
         answers: List[str] = []
         for q in payload.questions:
             try:
-                result = reason_over_query(q, doc_id=doc_id, top_k=7)
-                # Defensive: if retrieval/LLM disappointed, supply a graceful message
+                result = reason_over_query(q, doc_id=doc_id, top_k=5)  # reduced top_k for speed
                 if not result or (isinstance(result, dict) and not result.get("matched_clauses")):
                     result = {
-                        "justification": "No explicit exclusion matched. If the policy’s waiting period is already met, approve unless another exclusion applies."
+                        "justification": "No explicit exclusion matched. If the waiting period is already met, approve unless another exclusion applies."
                     }
             except Exception:
                 result = {"justification": "Error processing question"}
                 print(f"[error] reason_over_query failed:\n{traceback.format_exc()}")
 
             try:
-                # keep log simple & resilient
                 log_user_query(payload.session_id or "anonymous", q)
             except Exception as e:
                 print(f"[warn] Failed to log query: {e}")
